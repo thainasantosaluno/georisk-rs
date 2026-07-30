@@ -1,0 +1,20 @@
+# Banco local — 40+ MB, binário, reconstruível em ~2 min pelo coletor.
+# O que vai versionado é o snapshot padronizado em dados/ (CSV + JSON).
+*.db
+*.db-wal
+*.db-shm
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+.streamlit/secrets.toml
+.vscode/
+.DS_Store
+desktop.ini
+
+# Configuracao local do Claude Code / VS Code
+.claude/
+Claude/

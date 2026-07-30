@@ -1,0 +1,54 @@
+name: Coleta GeoRisk-RS
+
+# Atualização automática dos dados reais direto no GitHub.
+# A cada rodada o coletor lê SACE/SGB-CPRM + ANA/Telemetria, monta o banco e
+# versiona o snapshot padronizado em dados/ (CSV + JSON). O .db não é commitado
+# — é grande, binário, e reconstruível em ~2 min.
+on:
+  schedule:
+    - cron: "0 */3 * * *"   # de 3 em 3 horas (UTC)
+  workflow_dispatch:         # permite rodar na mão pela aba Actions
+  push:
+    branches: [main]
+    paths:
+      - "georisk_dados.py"
+      - ".github/workflows/coleta.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: coleta-georisk
+  cancel-in-progress: false
+
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependências do coletor
+        # O coletor não precisa de streamlit/folium/plotly — só do essencial.
+        run: pip install pandas requests urllib3
+
+      - name: Coletar dados reais e exportar snapshot
+        run: python georisk_dados.py --exportar
+
+      - name: Publicar snapshot se houve mudança
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dados/
+          if git diff --staged --quiet; then
+            echo "Nada mudou nesta rodada."
+          else
+            git commit -m "dados: coleta automática $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          fi

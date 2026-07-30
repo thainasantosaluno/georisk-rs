@@ -1,0 +1,19 @@
+{
+  "gerado_em": "2026-07-30 17:02:34",
+  "ultima_coleta": {
+    "iniciada_em": "2026-07-30 17:01:19",
+    "terminada_em": "2026-07-30 17:02:34",
+    "fontes": "SACE/SGB",
+    "estacoes": 46,
+    "erros": 3
+  },
+  "total_estacoes": 551,
+  "em_inundacao": 7,
+  "em_alerta": 6,
+  "em_atencao": 6,
+  "fontes": [
+    "SACE/SGB-CPRM",
+    "ANA/Telemetria"
+  ],
+  "abrangencia": "Rio Grande do Sul"
+}
