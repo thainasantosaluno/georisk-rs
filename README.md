@@ -22,10 +22,11 @@ usado como gazetteer) e o que não é RS é descartado.
 ## Arquivos
 
 ```
-georisk_dados.py   motor: coleta real + banco SQLite + padronização
-main.py            painel "Sala de Decisão"       (streamlit run main.py)
-dashboard.py       painel "Sala de Situação"      (streamlit run dashboard.py)
-dados/             snapshot padronizado publicado pela automação (CSV + JSON)
+georisk_dados.py      motor: coleta real + banco SQLite + padronização
+georisk_hidrologia.py módulo hidrológico: Tc, SCS-CN e projeção de cota
+main.py               painel "Sala de Decisão"    (streamlit run main.py)
+dashboard.py          painel "Sala de Situação"   (streamlit run dashboard.py)
+dados/                snapshot padronizado publicado pela automação (CSV + JSON)
 ```
 
 Os dois painéis compartilham o mesmo banco e o mesmo coletor — atualize por
@@ -82,6 +83,46 @@ coletor descarta e registra o motivo em `observacao`:
 O workflow `.github/workflows/coleta.yml` roda de 3 em 3 horas, coleta das
 fontes reais e versiona o snapshot em `dados/`. O banco SQLite não é commitado
 (40+ MB, binário, reconstruível em ~2 min).
+
+## Módulo hidrológico
+
+`georisk_hidrologia.py` relaciona chuva e nível para estimar em quanto tempo
+uma chuva chega ao rio. Está integrado na aba **Previsão Hidrológica** do
+`dashboard.py` e roda também sozinho:
+
+```bash
+python georisk_hidrologia.py SACE_taquari_2_3_4
+```
+
+```python
+import georisk_hidrologia as gh
+r = gh.estimar_tempo_e_impacto_inundacao("SACE_taquari_2_3_4")
+print(r["tempo_horas_ate_inundacao"], r["cota_maxima_projetada_cm"])
+```
+
+O que faz: tempo de resposta (Tc) por correlação cruzada entre a chuva de 15
+min e a taxa de subida do rio; chuva efetiva por SCS-CN com umidade antecedente
+tirada das 72 h; regressão da variação de cota (numpy puro — sem scikit-learn);
+e tempo até cruzar as cotas oficiais do SACE.
+
+### O que a validação mostrou
+
+O Tc cresce de montante para jusante no Taquari-Antas (Santa Tereza 9,75 h →
+Muçum 11,5 h → Encantado 12,25 h → Estrela 17 h), e cabeceiras pequenas
+respondem em 1–2 h. No retroteste da cheia de 22/07 em Estrela (pico real
+2.477 cm) os erros foram +154, +103, +28 e −8 cm nos quatro primeiros
+horizontes.
+
+Mas o ganho sobre a **persistência** ("o nível fica como está") só é positivo
+na primeira metade do Tc: +0,46 em 4 h, +0,28 em 8,5 h, negativo de 12,75 h em
+diante. Por isso o retorno traz `horizonte_util_horas` e `confiavel` — além
+desse alcance, a projeção perde para não projetar nada.
+
+Três limitações que valem conhecer: a chuva usada é a medida na própria
+estação, então em rios grandes (baixo Uruguai, r≈0,03) a projeção não vale;
+30 dias contêm poucos eventos para treinar; e Kirpich não é aplicado
+automaticamente porque o banco não tem morfometria de bacia — a função existe
+para quem tiver comprimento e declividade do talvegue.
 
 ## Aviso
 

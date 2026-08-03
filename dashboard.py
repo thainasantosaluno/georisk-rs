@@ -31,6 +31,7 @@ from plotly.subplots import make_subplots
 from streamlit_folium import st_folium
 
 import georisk_dados as gd
+import georisk_hidrologia as gh
 
 warnings.filterwarnings("ignore")
 
@@ -326,8 +327,12 @@ def exibir_boletim_modal(row: pd.Series) -> None:
 # -----------------------------------------------------------------------------
 # 6. ABAS
 # -----------------------------------------------------------------------------
-tab_mapa, tab_manchas = st.tabs(
-    ["📍 Estações SACE & Monitoramento", "🗺️ Manchas de Inundação (Satélite)"]
+tab_mapa, tab_manchas, tab_hidro = st.tabs(
+    [
+        "📍 Estações SACE & Monitoramento",
+        "🗺️ Manchas de Inundação (Satélite)",
+        "💧 Previsão Hidrológica (Chuva x Nível)",
+    ]
 )
 
 with tab_mapa:
@@ -491,3 +496,183 @@ with tab_manchas:
 
         st_folium(mapa_sat, width="100%", height=580, key="mapa_manchas_satelite")
         st.caption(f"{len(alvos)} estação(ões) desenhada(s), com cor de risco real.")
+
+# -----------------------------------------------------------------------------
+# 7. PREVISÃO HIDROLÓGICA — módulo georisk_hidrologia
+# -----------------------------------------------------------------------------
+with tab_hidro:
+    st.subheader("💧 Relação Chuva x Nível, tempo de resposta e projeção")
+    st.caption(
+        "Correlação cruzada chuva x taxa de subida do rio para obter o tempo de "
+        "resposta (Tc), balanço volumétrico SCS-CN com umidade antecedente de "
+        "72 h, e projeção da cota até cruzar as cotas oficiais do SACE."
+    )
+
+    @st.cache_data(ttl=300)
+    def _analisaveis() -> pd.DataFrame:
+        return gh.estacoes_analisaveis()
+
+    @st.cache_data(ttl=300, show_spinner="Modelando resposta da bacia…")
+    def _analisar(estacao_id: str, cn: float) -> dict:
+        return gh.estimar_tempo_e_impacto_inundacao(estacao_id, cn_base=cn)
+
+    elegiveis = _analisaveis()
+
+    if elegiveis.empty:
+        st.warning(
+            "Nenhuma estação tem as duas séries (cota e chuva) no banco. Rode uma "
+            "coleta incluindo o SACE — é ele que publica a série de 15 em 15 min."
+        )
+    else:
+        c_sel, c_cn = st.columns([3, 1])
+        with c_sel:
+            rotulos = {
+                f"{r.nome} — {r.rio or 'rio não informado'} "
+                f"({r.chuva_mm_periodo:.0f} mm no período)": r.id
+                for r in elegiveis.itertuples()
+            }
+            escolhido = st.selectbox("Estação:", list(rotulos), key="hidro_estacao")
+            estacao_id = rotulos[escolhido]
+        with c_cn:
+            cn = st.slider(
+                "Curve Number (CN):", 40, 95, int(gh.CN_PADRAO),
+                help="Parâmetro de escoamento, não medição. 75 = bacia rural mista "
+                     "em solo B/C. Maior CN = solo que infiltra menos.",
+            )
+
+        resultado = _analisar(estacao_id, float(cn))
+
+        # --- Indicadores
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric(
+            "Tempo de resposta (Tc)",
+            f"{resultado['tc_horas']:.1f} h" if resultado["tc_horas"] else "Indeterminado",
+            help="Defasagem de maior correlação entre a chuva e a subida do rio.",
+        )
+        k2.metric("Cota atual", texto(resultado["cota_atual_cm"], " cm"))
+        k3.metric(
+            "Cota máxima projetada",
+            texto(resultado["cota_maxima_projetada_cm"], " cm"),
+            delta=(
+                None
+                if resultado["cota_maxima_projetada_cm"] is None
+                or resultado["cota_atual_cm"] is None
+                else f"{resultado['cota_maxima_projetada_cm'] - resultado['cota_atual_cm']:+.0f} cm"
+            ),
+        )
+        horas = resultado["tempo_horas_ate_inundacao"]
+        k4.metric(
+            "Até a Cota de Inundação",
+            "JÁ ULTRAPASSADA" if horas == 0
+            else (f"{horas:.1f} h" if horas is not None else "Não projetada"),
+        )
+
+        # --- Confiabilidade em destaque: é o que decide se dá para usar
+        if resultado["confiavel"]:
+            st.success(
+                f"Projeção com ganho real sobre a persistência até "
+                f"**{resultado['horizonte_util_horas']:.1f} h** à frente "
+                f"(tendência: {resultado['tendencia']}).",
+                icon="✅",
+            )
+        else:
+            st.warning(
+                "**Projeção sem confiabilidade estatística no momento.** Os números "
+                "abaixo servem para diagnóstico, não para decisão.",
+                icon="⚠️",
+            )
+        for aviso in resultado["avisos"]:
+            st.caption(f"• {aviso}")
+
+        # --- Gráfico hietograma x hidrograma
+        if resultado["grafico_hietograma_hidrograma"] is not None:
+            st.plotly_chart(
+                resultado["grafico_hietograma_hidrograma"], use_container_width=True
+            )
+
+        # --- Balanço volumétrico e detalhamento
+        col_bal, col_proj = st.columns(2)
+
+        with col_bal:
+            st.markdown("##### 🌧️ Balanço volumétrico (SCS-CN)")
+            balanco = resultado["balanco_hidrico"] or {}
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "Grandeza": [
+                            "Precipitação 24 h",
+                            "Precipitação efetiva (escoamento)",
+                            "Abstração inicial",
+                            "Retenção potencial (S)",
+                            "CN ajustado",
+                            "Umidade do solo (pelas 72 h)",
+                        ],
+                        "Valor": [
+                            f"{balanco.get('precipitacao_total_mm', 0):.1f} mm",
+                            f"{balanco.get('precipitacao_efetiva_mm', 0):.1f} mm",
+                            f"{balanco.get('abstracao_inicial_mm', 0):.1f} mm",
+                            f"{balanco.get('retencao_potencial_mm', 0):.1f} mm",
+                            f"{balanco.get('cn_ajustado', 0):.1f}",
+                            balanco.get("condicao_umidade", "—"),
+                        ],
+                    }
+                ),
+                hide_index=True, use_container_width=True,
+            )
+            st.markdown("##### Precipitação acumulada")
+            st.dataframe(
+                pd.DataFrame(
+                    list(resultado["precipitacao_acumulada_mm"].items()),
+                    columns=["Janela", "mm"],
+                ),
+                hide_index=True, use_container_width=True,
+            )
+
+        with col_proj:
+            st.markdown("##### 📈 Projeção por horizonte")
+            if resultado["projecao"]:
+                proj = pd.DataFrame(resultado["projecao"])
+                proj["util"] = proj["ganho_sobre_persistencia"].apply(
+                    lambda g: "✅ útil" if (g or -1) > 0 else "⚠️ sem ganho"
+                )
+                st.dataframe(
+                    proj[["horas_a_frente", "cota_projetada_cm", "util"]],
+                    column_config={
+                        "horas_a_frente": st.column_config.NumberColumn(
+                            "h à frente", format="%.2f"
+                        ),
+                        "cota_projetada_cm": st.column_config.NumberColumn(
+                            "Cota (cm)", format="%.0f"
+                        ),
+                        "util": "Ganho sobre persistência",
+                    },
+                    hide_index=True, use_container_width=True,
+                )
+            st.markdown("##### 🚦 Situação das cotas oficiais")
+            st.dataframe(
+                pd.DataFrame(
+                    list((resultado.get("status_limiares") or {}).items()),
+                    columns=["Cota", "Situação"],
+                ),
+                hide_index=True, use_container_width=True,
+            )
+
+        with st.expander("🔬 Diagnóstico do modelo"):
+            st.json(
+                {
+                    "tc_horas": resultado["tc_horas"],
+                    "metodo_tc": resultado["metodo_tc"],
+                    "correlacao_chuva_nivel": resultado["correlacao_chuva_nivel"],
+                    "ganho_sobre_persistencia": resultado["ganho_sobre_persistencia"],
+                    "horizonte_util_horas": resultado["horizonte_util_horas"],
+                    "r2_validacao_walk_forward": resultado["qualidade_ajuste_r2"],
+                    "r2_treino": resultado["qualidade_ajuste_r2_treino"],
+                    "tendencia": resultado["tendencia"],
+                    "pico_ja_ocorreu": resultado["pico_ja_ocorreu"],
+                }
+            )
+            st.caption(
+                "O R² de treino é sempre bem maior que o de validação — assinatura "
+                "de um modelo que se ajusta ao passado recente. O número que vale "
+                "para decidir é o ganho sobre a persistência."
+            )
