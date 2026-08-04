@@ -23,6 +23,7 @@ usado como gazetteer) e o que não é RS é descartado.
 
 ```
 georisk_dados.py      motor: coleta real + banco SQLite + padronização
+georisk_geo.py        manchas oficiais + CN real por bacia (solo e uso da terra)
 georisk_hidrologia.py módulo hidrológico: Tc, SCS-CN e projeção de cota
 main.py               painel "Sala de Decisão"    (streamlit run main.py)
 dashboard.py          painel "Sala de Situação"   (streamlit run dashboard.py)
@@ -124,10 +125,66 @@ estação, então em rios grandes (baixo Uruguai, r≈0,03) a projeção não va
 automaticamente porque o banco não tem morfometria de bacia — a função existe
 para quem tiver comprimento e declividade do talvegue.
 
+## Camada geoespacial
+
+`georisk_geo.py` traz geometria oficial e caracterização de solo. Prepare com:
+
+```bash
+python georisk_geo.py
+```
+
+### Manchas oficiais de inundação
+
+| Fonte | Cobertura | Natureza |
+|---|---|---|
+| **SGB / IPH-UFRGS** | Lajeado, São Sebastião do Caí, Montenegro, Alegrete, Uruguaiana — 67 manchas | Indexadas por **cota em cm** |
+| **Defesa Civil RS** | 7 municípios do Vale do Taquari | Evento de 22/07/2026 |
+
+As do SGB encaixam direto no painel: como são indexadas por cota, escolher a
+mancha é uma busca, não um cálculo. Montenegro medindo 765 cm exibe a mancha de
+750 cm — a maior cota mapeada que não passa do nível medido, que é a leitura
+conservadora (a área de 750 está contida na de 765).
+
+A Defesa Civil publica 60 municípios, mas em PDF, sem geometria. Só os 7 do
+Vale do Taquari têm mapa navegável, de onde sai KML.
+
+A SEMA-RS não publica mancha consumível: o `geoportal.sema.rs.gov.br` está no
+ar mas serve apenas a página padrão do IIS.
+
+Onde não há mancha oficial, o painel diz isso — o traçado esquemático de senos
+e cossenos virou opção desligada por padrão.
+
+### Curve Number real por bacia
+
+Antes o CN era 75 fixo para o estado inteiro. Agora vem de solo e uso da terra:
+
+- `CREN:PedologiaSG22/SH21/SH22/SI22` (IBGE) → ordem e subordem do solo →
+  grupo hidrológico A–D pela classificação de Sartori, Lombardi Neto & Genovez
+- `CREN:Cobertura_uso_terra_2020_RS_serie_revisada` (IBGE) → classe de uso
+- Polígono da bacia vindo do próprio SACE, o que evita delinear bacia por MDE
+
+| Bacia | CN | Cobertura no RS | Solo identificado |
+|---|---|---|---|
+| Rio Uruguai | 74,7 | 57,4% | 94,1% |
+| Guaíba | 73,8 | 100% | 96,5% |
+| Rio Caí | 73,5 | 100% | 96,3% |
+| Taquari-Antas | 72,3 | 100% | 98,2% |
+
+O cálculo é por amostragem em grade regular dentro da bacia — que dá a mesma
+média ponderada por área da interseção de polígonos, sem o custo e a fragilidade
+de cruzar 48 mil polígonos. Pontos fora do RS são **descartados**, não
+estimados: as bacias do Uruguai e do Taquari entram em SC, na Argentina e no
+Uruguai, e a camada do IBGE é estadual.
+
+Efeito no balanço hídrico: muda `retenção potencial`, `abstração inicial` e
+`precipitação efetiva`. **Não** muda a precipitação acumulada, que é medição.
+Em Encantado no pico de 22/07, o escoamento passou de 38,4 para 35,5 mm.
+
+As duas tabelas de conversão (solo → grupo, uso × grupo → CN) continuam sendo
+**parâmetro documentado, não medição**, e ficam expostas no topo do módulo.
+
 ## Aviso
 
-As "manchas de inundação" do segundo painel são **traçado esquemático** gerado
-matematicamente ao redor da estação — não são mancha de inundação medida ou
-oficial. O que é real ali é a **cor**, que vem da cota medida comparada à cota
-oficial do SACE. Para extensão de inundação oficial, integre uma camada WMS da
-Defesa Civil / SGB.
+O traçado esquemático que sobrou como opção — senos e cossenos ao redor da
+estação — **não** é mancha medida. Use as manchas oficiais; o esquemático serve
+só para dar noção de extensão onde não existe modelagem publicada.

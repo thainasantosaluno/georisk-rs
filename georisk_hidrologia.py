@@ -740,7 +740,7 @@ def grafico_hietograma_hidrograma(
 def estimar_tempo_e_impacto_inundacao(
     estacao_id: str,
     db_path: str = CAMINHO_BANCO_PADRAO,
-    cn_base: float = CN_PADRAO,
+    cn_base: float | None = None,
     dias_historico: int = 30,
     ate_instante: str | pd.Timestamp | None = None,
 ) -> dict:
@@ -751,7 +751,10 @@ def estimar_tempo_e_impacto_inundacao(
     estacao_id : id da estação no banco (ex.: "SACE_taquari_2").
                  Use `estacoes_analisaveis()` para listar as elegíveis.
     db_path    : caminho do `georisk_rs.db`.
-    cn_base    : Curve Number em AMC II. Padrão 75 (rural misto, solo B/C).
+    cn_base    : Curve Number em AMC II. Se None (padrão), usa o CN REAL da
+        bacia, derivado de pedologia e uso da terra do IBGE por
+        `georisk_geo.cn_da_bacia()`. Só cai no valor genérico de 75 quando a
+        bacia ainda não teve o CN calculado. Passe um número para forçar.
     dias_historico : janela de treino.
     ate_instante : corta a série neste instante e finge que "agora" é ele.
         Serve para RETROTESTE (rodar sobre uma cheia passada e comparar a
@@ -774,6 +777,21 @@ def estimar_tempo_e_impacto_inundacao(
     """
     cadastro = carregar_cadastro(estacao_id, db_path)
     df = carregar_series_alinhadas(estacao_id, db_path, dias=dias_historico)
+
+    # --- CN: real da bacia quando existir, senão o genérico documentado.
+    cn_origem = "informado pelo usuário"
+    if cn_base is None:
+        cn_bacia = None
+        try:
+            import georisk_geo as gg
+            cn_bacia = gg.cn_da_bacia(cadastro.get("bacia"), db_path)
+        except Exception:
+            cn_bacia = None
+        if cn_bacia:
+            cn_base, cn_origem = float(cn_bacia), "IBGE: pedologia + uso da terra da bacia"
+        else:
+            cn_base, cn_origem = CN_PADRAO, "genérico (bacia sem CN calculado)"
+
 
     if ate_instante is not None and not df.empty:
         corte = pd.Timestamp(ate_instante)
@@ -801,6 +819,8 @@ def estimar_tempo_e_impacto_inundacao(
         "precipitacao_acumulada_mm": {},
         "volume_efetivo_mm": None,
         "balanco_hidrico": None,
+        "cn_base": None,
+        "cn_origem": None,
         "cota_maxima_projetada_cm": None,
         "instante_pico_projetado": None,
         "pico_ja_ocorreu": None,
@@ -845,6 +865,8 @@ def estimar_tempo_e_impacto_inundacao(
         p72_mm=float(acumulados["p72h"].iloc[-1]),
         cn_base=cn_base,
     )
+    resposta["cn_base"] = round(float(cn_base), 1)
+    resposta["cn_origem"] = cn_origem
     resposta["volume_efetivo_mm"] = balanco.precipitacao_efetiva_mm
     resposta["balanco_hidrico"] = balanco.__dict__.copy()
 

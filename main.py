@@ -40,6 +40,7 @@ from plotly.subplots import make_subplots
 from streamlit_folium import st_folium
 
 import georisk_dados as gd
+import georisk_geo as gg
 
 warnings.filterwarnings("ignore")
 
@@ -390,6 +391,119 @@ def estacao_clicada(retorno_mapa, candidatas: pd.DataFrame, tolerancia: float = 
 
 # -----------------------------------------------------------------------------
 # 7. ABAS
+
+# -----------------------------------------------------------------------------
+# MANCHAS OFICIAIS — georisk_geo (SGB/IPH-UFRGS + Defesa Civil RS)
+# -----------------------------------------------------------------------------
+@st.cache_data(ttl=600)
+def _inventario_manchas() -> list[dict]:
+    return gg.municipios_com_mancha()
+
+
+@st.cache_data(ttl=600)
+def _mancha_por_cota(municipio: str, cota_cm: float | None) -> dict | None:
+    return gg.mancha_para_cota(municipio, cota_cm)
+
+
+@st.cache_data(ttl=600)
+def _mancha_evento(municipio: str) -> dict | None:
+    return gg.mancha_de_evento(municipio)
+
+
+def _candidatos_de_nome(linha) -> list[str]:
+    """Nomes possíveis do município de uma estação.
+
+    A estação do SACE tem só o nome do posto (ex.: "Passo Montenegro"), e a
+    mancha é catalogada pelo município ("Montenegro"). Tentamos os dois campos
+    e também cada palavra, porque o casamento é feito com normalização.
+    """
+    nomes = []
+    for campo in ("municipio", "nome"):
+        valor = linha.get(campo)
+        if valor is not None and not pd.isna(valor):
+            texto = str(valor).strip()
+            if texto:
+                nomes.append(texto)
+                nomes.extend(p for p in texto.split() if len(p) > 3)
+    return nomes
+
+
+def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
+                              mostrar_cota: bool, mostrar_evento: bool) -> dict:
+    """Desenha a mancha oficial de cada estação que tiver uma.
+
+    Para a mancha por cota, escolhe a maior cota mapeada que não passa da cota
+    medida agora — a leitura conservadora: a área de 750 cm está contida na de
+    765 cm, então mostrá-la não exagera o risco.
+    """
+    resumo = {"por_cota": [], "por_evento": [], "sem_mancha": []}
+    ja_desenhado = set()
+
+    for _, est in estacoes.iterrows():
+        nomes = _candidatos_de_nome(est)
+        nivel = est.get("nivel_cm")
+        nivel = None if nivel is None or pd.isna(nivel) else float(nivel)
+
+        achou = False
+
+        if mostrar_cota and nivel is not None:
+            for nome in nomes:
+                mancha = _mancha_por_cota(nome, nivel)
+                if not mancha:
+                    continue
+                chave = ("cota", mancha["municipio"], mancha["cota_cm"])
+                if chave not in ja_desenhado:
+                    folium.GeoJson(
+                        mancha["geojson"],
+                        name=f"Mancha oficial {mancha['municipio']}",
+                        style_function=lambda _f, o=opacidade: {
+                            "fillColor": "#d32f2f", "color": "#b71c1c",
+                            "weight": 1.5, "fillOpacity": o,
+                        },
+                        tooltip=(
+                            f"<b>Mancha OFICIAL — {mancha['municipio']}</b><br>"
+                            f"{mancha['rotulo']}<br>"
+                            f"Nível medido: {nivel:.0f} cm<br>"
+                            f"<i>{mancha['fonte']}</i>"
+                        ),
+                    ).add_to(mapa)
+                    ja_desenhado.add(chave)
+                    resumo["por_cota"].append(
+                        f"{mancha['municipio']} ({int(mancha['cota_cm'])} cm)"
+                    )
+                achou = True
+                break
+
+        if mostrar_evento:
+            for nome in nomes:
+                evento = _mancha_evento(nome)
+                if not evento:
+                    continue
+                chave = ("evento", evento["municipio"])
+                if chave not in ja_desenhado:
+                    folium.GeoJson(
+                        evento["geojson"],
+                        name=f"Evento {evento['municipio']}",
+                        style_function=lambda _f, o=opacidade: {
+                            "fillColor": "#1976d2", "color": "#0d47a1",
+                            "weight": 1.2, "fillOpacity": o * 0.7,
+                        },
+                        tooltip=(
+                            f"<b>{evento['municipio']} — {evento['rotulo']}</b><br>"
+                            f"<i>{evento['fonte']}</i>"
+                        ),
+                    ).add_to(mapa)
+                    ja_desenhado.add(chave)
+                    resumo["por_evento"].append(evento["municipio"])
+                achou = True
+                break
+
+        if not achou:
+            resumo["sem_mancha"].append(est.get("nome"))
+
+    return resumo
+
+
 # -----------------------------------------------------------------------------
 tab1, tab2 = st.tabs(
     ["📍 Estações & Monitoramento", "🗺️ Manchas de Inundação (esquemático)"]
@@ -453,13 +567,11 @@ with tab1:
 
 with tab2:
     st.markdown("### 🗺️ Manchas de Inundação — visualização esquemática")
-    st.warning(
-        "⚠️ **Estas manchas NÃO são mancha de inundação medida.** O traçado é "
-        "gerado matematicamente ao redor da estação, só para dar noção de "
-        "extensão. O que é real aqui é a **cor**, que vem da cota medida "
-        "comparada à cota oficial. Para mancha oficial, some uma camada WMS da "
-        "Defesa Civil/SGB.",
-        icon="⚠️",
+    st.caption(
+        "Manchas OFICIAIS do geoportal do SGB (modelagem hidráulica do "
+        "IPH-UFRGS, indexada por cota) e da Defesa Civil do RS (evento de "
+        f"{gg.EVENTO_DEFESA_CIVIL}). Para cada estação é exibida a maior cota "
+        "mapeada que não passa do nível medido agora."
     )
 
     col_ctrl, col_mapa = st.columns([1, 3])
@@ -470,10 +582,19 @@ with tab2:
             key="sb_t2",
         )
         st.markdown("---")
-        v_atencao = st.checkbox("🟡 Camada - Cota de Atenção", value=True)
-        v_alerta = st.checkbox("🟠 Camada - Cota de Alerta", value=True)
-        v_inundacao = st.checkbox("🔴 Camada - Cota de Inundação", value=True)
-        v_eixo = st.checkbox("🟢 Exibir Eixo do Rio (Traçado)", value=True)
+        st.markdown("**🗺️ Manchas oficiais**")
+        v_oficial_cota = st.checkbox("🔴 Por cota (SGB/IPH-UFRGS)", value=True)
+        v_oficial_evento = st.checkbox(
+            f"🔵 Evento {gg.EVENTO_DEFESA_CIVIL} (Defesa Civil)", value=True
+        )
+
+        st.markdown("---")
+        st.markdown("**🎨 Esquemático** (ilustrativo, não medido)")
+        v_esquematico = st.checkbox("Exibir esquemático", value=False)
+        v_atencao = st.checkbox("🟡 Cota de Atenção", value=True, disabled=not v_esquematico)
+        v_alerta = st.checkbox("🟠 Cota de Alerta", value=True, disabled=not v_esquematico)
+        v_inundacao = st.checkbox("🔴 Cota de Inundação", value=True, disabled=not v_esquematico)
+        v_eixo = st.checkbox("🟢 Eixo do Rio", value=True, disabled=not v_esquematico)
         st.markdown("---")
         opac = st.slider("Opacidade da Mancha (%):", 20, 100, 60) / 100.0
         so_criticas = st.checkbox(
@@ -499,7 +620,11 @@ with tab2:
         if so_criticas:
             alvos = alvos[alvos["cor"].isin(["gold", "orange", "red", "purple"])]
 
-        for _, est in alvos.iterrows():
+        resumo_oficial = desenhar_manchas_oficiais(
+            mapa_sat, alvos, opac, v_oficial_cota, v_oficial_evento
+        )
+
+        for _, est in (alvos.iterrows() if v_esquematico else iter([])):
             rio = _ou(est.get("rio"), est["nome"])
             poly_at, eixo = gerar_morfologia_rio_e_mancha(est["lat"], est["lon"], 1.8)
             poly_al, _ = gerar_morfologia_rio_e_mancha(est["lat"], est["lon"], 1.3)
@@ -530,4 +655,24 @@ with tab2:
                 ).add_to(mapa_sat)
 
         st_folium(mapa_sat, width="100%", height=600, key="mapa_satelite_morfologico")
-        st.caption(f"{len(alvos)} estação(ões) desenhada(s) com cor de risco real.")
+
+        n_cota = len(resumo_oficial["por_cota"])
+        n_evento = len(resumo_oficial["por_evento"])
+        if n_cota or n_evento:
+            partes = []
+            if n_cota:
+                partes.append("por cota: " + ", ".join(resumo_oficial["por_cota"]))
+            if n_evento:
+                partes.append("evento: " + ", ".join(resumo_oficial["por_evento"]))
+            st.success("Manchas oficiais desenhadas — " + " · ".join(partes), icon="🗺️")
+        else:
+            st.info(
+                "Nenhuma estação do recorte tem mancha oficial no nível atual. "
+                "Há manchas por cota para Lajeado, São Sebastião do Caí, "
+                "Montenegro, Alegrete e Uruguaiana, e de evento para 7 municípios "
+                "do Vale do Taquari."
+            )
+        st.caption(
+            f"{len(alvos)} estação(ões) no recorte · "
+            f"{len(resumo_oficial['sem_mancha'])} sem mancha oficial."
+        )
