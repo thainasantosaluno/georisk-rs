@@ -210,6 +210,12 @@ def criar_schema_geo(db_path: str = CAMINHO_BANCO_PADRAO) -> None:
                 calculado_em   TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS caracterizacao_bacia (
+                bacia        TEXT PRIMARY KEY,
+                dados        TEXT,   -- JSON: litologia, estruturas, geomorfologia
+                calculado_em TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS ix_mancha_mun ON mancha_oficial (municipio, cota_cm);
             """
         )
@@ -692,11 +698,34 @@ def calcular_cn_bacia(
             grupo_solo.append(grupo)
             ordem_solo.append(f["properties"].get("Ordem"))
     arvore_solo = STRtree(geo_solo) if geo_solo else None
-    avisar(0.88, f"{len(geo_solo)} polígonos de solo classificados.")
+    avisar(0.85, f"{len(geo_solo)} polígonos de solo classificados.")
+
+    # --- Litologia, para refinar o grupo hidrológico onde o SOLO É RASO.
+    # Em solo profundo quem manda é o solo; em Neossolo Litólico e Cambissolo,
+    # a rocha logo abaixo é que decide se a água infiltra ou escorre. Basalto
+    # maciço da Serra Geral e arenito Botucatu se comportam de forma oposta.
+    avisar(0.87, "Litologia (para solos rasos)…")
+    geo_lito, grupo_lito = [], []
+    try:
+        lito = _wfs_geojson(CAMADA_GEOLOGIA, (minx, miny, maxx, maxy))
+        for f in lito.get("features", []):
+            grupo = _grupo_da_litologia(f["properties"].get("nm_unidade"))
+            if grupo is None:
+                continue
+            try:
+                geo_lito.append(shape(f["geometry"]))
+            except Exception:
+                continue
+            grupo_lito.append(grupo)
+    except Exception:
+        pass
+    arvore_lito = STRtree(geo_lito) if geo_lito else None
+    avisar(0.9, f"{len(geo_lito)} polígonos de litologia classificados.")
 
     # --- Amostragem
     from collections import Counter
     contagem_uso, contagem_grupo, contagem_ordem = Counter(), Counter(), Counter()
+    contagem_refino = Counter()
     soma_cn, validos, fora_do_rs = 0.0, 0, 0
 
     for ponto in amostras:
@@ -718,12 +747,22 @@ def calcular_cn_bacia(
 
         # O solo só é consultado para ponto que já sabemos estar no RS —
         # senão o contador de ordens somava pontos depois descartados.
-        grupo = None
+        grupo, ordem_aqui = None, None
         if arvore_solo is not None:
             for idx in arvore_solo.query(ponto):
                 if geo_solo[idx].contains(ponto):
                     grupo = grupo_solo[idx]
-                    contagem_ordem[ordem_solo[idx]] += 1
+                    ordem_aqui = ordem_solo[idx]
+                    contagem_ordem[ordem_aqui] += 1
+                    break
+
+        # Solo raso: a rocha embaixo condiciona. Só nesse caso a litologia entra.
+        if ordem_aqui and str(ordem_aqui).upper() in SOLOS_RASOS and arvore_lito is not None:
+            for idx in arvore_lito.query(ponto):
+                if geo_lito[idx].contains(ponto):
+                    if grupo_lito[idx] != grupo:
+                        contagem_refino[f"{ordem_aqui}: {grupo}->{grupo_lito[idx]}"] += 1
+                    grupo = grupo_lito[idx]
                     break
 
         grupo_final = grupo or GRUPO_PADRAO
@@ -741,6 +780,7 @@ def calcular_cn_bacia(
         "pontos_no_rs": validos,
         "pontos_fora_do_rs": fora_do_rs,
         "cobertura_rs_pct": round(100 * validos / max(len(amostras), 1), 1),
+        "refino_por_litologia": dict(contagem_refino.most_common()),
         "solo_identificado_pct": round(
             100 * sum(contagem_ordem.values()) / max(validos, 1), 1
         ),
@@ -833,6 +873,327 @@ def preparar_tudo(db_path: str = CAMINHO_BANCO_PADRAO, progresso=None) -> dict:
 
     avisar(1.0, "Camada geoespacial pronta.")
     return {"manchas_sgb_novas": n_sgb, "manchas_defesa_civil_novas": n_dc, "cn_por_bacia": cns}
+
+
+# -----------------------------------------------------------------------------
+# 7. GEOLOGIA, ESTRUTURA E GEOMORFOLOGIA (IBGE / BDIA)
+# -----------------------------------------------------------------------------
+# Três camadas do Banco de Dados de Informações Ambientais do IBGE:
+#   BDIA:geol_area          -> unidade litoestratigráfica (Serra Geral, Botucatu…)
+#   BDIA:geol_linha_falha   -> falhas, com forma (definida/inferida) e mergulho
+#   BDIA:geol_linha_fratura -> fraturas, com mergulho e rocha associada
+#   BDIA:geom_area          -> geomorfologia, com DENSIDADE DE DRENAGEM e incisão
+#
+# ONDE CADA UMA ENTRA — E ONDE NÃO ENTRA
+# --------------------------------------
+# 1) LITOLOGIA refina o grupo hidrológico de SOLO RASO, e só dele. Um Neossolo
+#    Litólico sobre basalto maciço da Serra Geral realmente escoa quase tudo
+#    (grupo D); o mesmo Neossolo sobre o arenito Botucatu infiltra muito
+#    (grupo A). Aplicar a litologia onde o solo é profundo seria errado: ali
+#    quem manda é o solo, não a rocha embaixo.
+#
+# 2) DENSIDADE DE DRENAGEM serve de AFERIÇÃO do Tc, não de entrada. Bacia com
+#    drenagem densa responde mais rápido — é relação consagrada. Usamos para
+#    dizer "o Tc medido é compatível com a densidade observada", do mesmo modo
+#    que Kirpich serviria se houvesse morfometria. Não realimenta o cálculo.
+#
+# 3) DENSIDADE DE LINEAMENTOS (falhas + fraturas) fica como CARACTERIZAÇÃO
+#    apenas. É proxy reconhecido de permeabilidade secundária, mas NÃO existe
+#    coeficiente consagrado que a converta em correção de Curve Number.
+#    Inventar esse fator seria repetir exatamente o que este projeto passou a
+#    remover. O índice é calculado, exibido e documentado — a interpretação
+#    fica com quem tem a referência da área.
+
+CAMADA_GEOLOGIA = "BDIA:geol_area"
+CAMADA_FALHAS = "BDIA:geol_linha_falha"
+CAMADA_FRATURAS = "BDIA:geol_linha_fratura"
+CAMADA_GEOMORFOLOGIA = "BDIA:geom_area"
+
+# Unidade litoestratigráfica -> grupo hidrológico da ROCHA, aplicado só onde o
+# solo é raso. Chave por prefixo, porque o IBGE detalha fácies
+# ("Serra Geral - Fácies Caxias").
+LITOLOGIA_GRUPO = {
+    "SERRA GERAL": "D",        # basalto/riodacito maciço: escoa
+    "BOTUCATU": "A",           # arenito eólico: muito permeável
+    "PIRAMBOIA": "A",
+    "ROSARIO DO SUL": "B",     # arenito/siltito
+    "SANTA MARIA": "C",
+    "RIO DO RASTO": "C",
+    "ESTRADA NOVA": "C",
+    "IRATI": "D",              # folhelho/siltito: impermeável
+    "PALERMO": "C",
+    "RIO BONITO": "B",
+    "ITARARE": "B",
+    "DEPOSITOS ALUVIONARES": "C",
+    "DEPOSITOS COLUVIO": "C",
+    "GRANITO": "D",
+    "GNAISSE": "D",
+}
+
+# Solos rasos: são estes que a rocha embaixo condiciona de fato.
+SOLOS_RASOS = {"NEOSSOLO", "CAMBISSOLO", "AFLORAMENTOS DE ROCHAS"}
+
+# Densidade de drenagem do IBGE -> faixa de tempo de resposta esperada.
+# Serve para conferir o Tc empírico, não para calculá-lo.
+DRENAGEM_TC_ESPERADO = {
+    "muito alta": (0.5, 6.0),
+    "alta": (1.0, 10.0),
+    "média": (4.0, 18.0),
+    "baixa": (8.0, 30.0),
+    "muito baixa": (12.0, 48.0),
+}
+
+
+def _grupo_da_litologia(nome_unidade: str | None) -> str | None:
+    if not nome_unidade:
+        return None
+    alvo = _normalizar(nome_unidade)
+    for chave, grupo in LITOLOGIA_GRUPO.items():
+        if _normalizar(chave) in alvo:
+            return grupo
+    return None
+
+
+def _km_por_grau(latitude: float) -> tuple[float, float]:
+    """Conversão local grau->km. Longitude encurta com o cosseno da latitude."""
+    import math
+    return 111.32 * math.cos(math.radians(latitude)), 110.57
+
+
+def caracterizar_bacia(
+    bacia: str,
+    db_path: str = CAMINHO_BANCO_PADRAO,
+    lado_grade: int = 70,
+    progresso=None,
+    recalcular: bool = False,
+) -> dict | None:
+    """Litologia, estrutura e geomorfologia da bacia.
+
+    Devolve composição litológica, densidade de lineamentos em km/km² e a
+    densidade de drenagem dominante, além do intervalo de Tc que essa densidade
+    faria esperar — para você confrontar com o Tc que sai da correlação.
+    """
+    from shapely.geometry import shape, Point
+    from shapely.ops import unary_union
+    from shapely.prepared import prep
+    from shapely.strtree import STRtree
+
+    criar_schema_geo(db_path)
+    if not recalcular:
+        with _conectar(db_path) as con:
+            linha = con.execute(
+                "SELECT dados, calculado_em FROM caracterizacao_bacia WHERE bacia=?",
+                (bacia,),
+            ).fetchone()
+        if linha:
+            saida = json.loads(linha[0])
+            saida["do_cache"] = True
+            return saida
+
+    def avisar(f, m):
+        if progresso:
+            try:
+                progresso(f, m)
+            except Exception:
+                pass
+
+    avisar(0.05, f"Contorno da bacia {bacia}…")
+    geo_bacia = baixar_bacia(bacia, db_path)
+    if not geo_bacia or not geo_bacia.get("features"):
+        return None
+    contorno = unary_union([shape(f["geometry"]) for f in geo_bacia["features"]])
+    pronto = prep(contorno)
+    minx, miny, maxx, maxy = contorno.bounds
+    lat_media = (miny + maxy) / 2
+    kx, ky = _km_por_grau(lat_media)
+    area_km2 = contorno.area * kx * ky
+
+    # --- Grade de amostragem (mesma lógica do CN: pontos equiespaçados = área)
+    passo_x = (maxx - minx) / lado_grade
+    passo_y = (maxy - miny) / lado_grade
+    amostras = [
+        Point(minx + (i + 0.5) * passo_x, miny + (j + 0.5) * passo_y)
+        for i in range(lado_grade) for j in range(lado_grade)
+    ]
+    amostras = [p for p in amostras if pronto.contains(p)]
+    if not amostras:
+        return None
+
+    from collections import Counter
+
+    # --- Litologia
+    avisar(0.2, "Litologia (BDIA:geol_area)…")
+    geol = _wfs_geojson(CAMADA_GEOLOGIA, (minx, miny, maxx, maxy),
+                        progresso=lambda m: avisar(0.25, m))
+    poligonos, unidades, tempos = [], [], []
+    for f in geol.get("features", []):
+        try:
+            poligonos.append(shape(f["geometry"]))
+        except Exception:
+            continue
+        unidades.append(f["properties"].get("nm_unidade"))
+        tempos.append(f["properties"].get("nm_tempo_g"))
+    arvore_geol = STRtree(poligonos) if poligonos else None
+
+    conta_unidade, conta_tempo = Counter(), Counter()
+    for ponto in amostras:
+        if arvore_geol is None:
+            break
+        for idx in arvore_geol.query(ponto):
+            if poligonos[idx].contains(ponto):
+                conta_unidade[unidades[idx]] += 1
+                conta_tempo[tempos[idx]] += 1
+                break
+
+    # --- Geomorfologia
+    avisar(0.5, "Geomorfologia (BDIA:geom_area)…")
+    geom = _wfs_geojson(CAMADA_GEOMORFOLOGIA, (minx, miny, maxx, maxy),
+                        progresso=lambda m: avisar(0.55, m))
+    pol_geom, densidades, incisoes, unid_geom = [], [], [], []
+    for f in geom.get("features", []):
+        try:
+            pol_geom.append(shape(f["geometry"]))
+        except Exception:
+            continue
+        densidades.append(f["properties"].get("dens_dren"))
+        incisoes.append(f["properties"].get("aprof_inci"))
+        unid_geom.append(f["properties"].get("nm_unidade"))
+    arvore_geom = STRtree(pol_geom) if pol_geom else None
+
+    conta_dens, conta_inci, conta_relevo = Counter(), Counter(), Counter()
+    for ponto in amostras:
+        if arvore_geom is None:
+            break
+        for idx in arvore_geom.query(ponto):
+            if pol_geom[idx].contains(ponto):
+                if densidades[idx]:
+                    conta_dens[densidades[idx]] += 1
+                if incisoes[idx]:
+                    conta_inci[incisoes[idx]] += 1
+                if unid_geom[idx]:
+                    conta_relevo[unid_geom[idx]] += 1
+                break
+
+    # --- Estruturas: comprimento DENTRO da bacia, não o comprimento total
+    estruturas = {}
+    for rotulo, camada in (("falhas", CAMADA_FALHAS), ("fraturas", CAMADA_FRATURAS)):
+        avisar(0.7, f"Estruturas: {rotulo}…")
+        try:
+            linhas = _wfs_geojson(camada, (minx, miny, maxx, maxy),
+                                  progresso=lambda m: avisar(0.75, m))
+        except Exception:
+            estruturas[rotulo] = {"n": 0, "km": 0.0, "km_por_km2": 0.0}
+            continue
+
+        comprimento_graus, quantidade = 0.0, 0
+        formas, mergulhos = Counter(), Counter()
+        for f in linhas.get("features", []):
+            try:
+                geometria = shape(f["geometry"])
+            except Exception:
+                continue
+            recorte = geometria.intersection(contorno)
+            if recorte.is_empty:
+                continue
+            comprimento_graus += recorte.length
+            quantidade += 1
+            props = f["properties"]
+            if props.get("forma"):
+                formas[props["forma"]] += 1
+            merg = props.get("estm_merg") or props.get("mergulho")
+            if merg:
+                mergulhos[merg] += 1
+
+        km = comprimento_graus * ((kx + ky) / 2)
+        estruturas[rotulo] = {
+            "n": quantidade,
+            "km": round(km, 1),
+            "km_por_km2": round(km / area_km2, 4) if area_km2 else 0.0,
+            "forma": dict(formas.most_common()),
+            "mergulho": dict(mergulhos.most_common()),
+        }
+
+    densidade_dominante = conta_dens.most_common(1)[0][0] if conta_dens else None
+    tc_esperado = DRENAGEM_TC_ESPERADO.get(densidade_dominante)
+
+    total_lineamentos = sum(e["km"] for e in estruturas.values())
+    resultado = {
+        "bacia": bacia,
+        "nome": BACIAS_SACE.get(bacia, bacia),
+        "area_km2": round(area_km2, 1),
+        "amostras": len(amostras),
+        "litologia": {
+            "unidades": dict(conta_unidade.most_common()),
+            "tempo_geologico": dict(conta_tempo.most_common(6)),
+        },
+        "geomorfologia": {
+            "densidade_drenagem": dict(conta_dens.most_common()),
+            "densidade_dominante": densidade_dominante,
+            "aprofundamento_incisao": dict(conta_inci.most_common(5)),
+            "unidades_relevo": dict(conta_relevo.most_common(5)),
+        },
+        "estruturas": estruturas,
+        "densidade_lineamentos_km_km2": (
+            round(total_lineamentos / area_km2, 4) if area_km2 else 0.0
+        ),
+        "tc_esperado_pela_drenagem_h": tc_esperado,
+        "calculado_em": _agora(),
+        "do_cache": False,
+    }
+
+    with _conectar(db_path) as con:
+        con.execute(
+            "INSERT OR REPLACE INTO caracterizacao_bacia (bacia,dados,calculado_em) "
+            "VALUES (?,?,?)",
+            (bacia, json.dumps(resultado, ensure_ascii=False), _agora()),
+        )
+    avisar(1.0, f"Caracterização da bacia {bacia} concluída.")
+    return resultado
+
+
+def caracterizacoes(db_path: str = CAMINHO_BANCO_PADRAO) -> list[dict]:
+    criar_schema_geo(db_path)
+    with _conectar(db_path) as con:
+        linhas = con.execute("SELECT dados FROM caracterizacao_bacia").fetchall()
+    return [json.loads(d[0]) for d in linhas]
+
+
+def conferir_tc(bacia_rotulo: str | None, tc_horas: float | None,
+                db_path: str = CAMINHO_BANCO_PADRAO) -> dict | None:
+    """Confronta o Tc empírico com o que a densidade de drenagem faria esperar.
+
+    É AFERIÇÃO, não correção: o Tc continua vindo da correlação cruzada entre
+    chuva e subida do rio. Aqui só se diz se ele é compatível com o relevo.
+    """
+    if tc_horas is None:
+        return None
+    chave = _ROTULO_PARA_CHAVE.get(_normalizar(bacia_rotulo))
+    if not chave:
+        return None
+    with _conectar(db_path) as con:
+        linha = con.execute(
+            "SELECT dados FROM caracterizacao_bacia WHERE bacia=?", (chave,)
+        ).fetchone()
+    if not linha:
+        return None
+
+    dados = json.loads(linha[0])
+    faixa = dados.get("tc_esperado_pela_drenagem_h")
+    if not faixa:
+        return None
+    minimo, maximo = faixa
+    if tc_horas < minimo:
+        veredito = "mais rápido que o esperado para esta densidade de drenagem"
+    elif tc_horas > maximo:
+        veredito = "mais lento que o esperado para esta densidade de drenagem"
+    else:
+        veredito = "compatível com a densidade de drenagem da bacia"
+    return {
+        "densidade_drenagem": dados["geomorfologia"]["densidade_dominante"],
+        "tc_esperado_h": faixa,
+        "tc_medido_h": tc_horas,
+        "veredito": veredito,
+    }
 
 
 if __name__ == "__main__":

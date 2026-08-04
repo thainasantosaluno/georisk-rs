@@ -816,6 +816,7 @@ def estimar_tempo_e_impacto_inundacao(
         "tc_horas": None,
         "correlacao_chuva_nivel": None,
         "metodo_tc": None,
+        "afericao_tc": None,
         "precipitacao_acumulada_mm": {},
         "volume_efetivo_mm": None,
         "balanco_hidrico": None,
@@ -876,6 +877,18 @@ def estimar_tempo_e_impacto_inundacao(
     resposta["correlacao_chuva_nivel"] = round(tempo.correlacao, 3)
     resposta["metodo_tc"] = tempo.metodo
     resposta["avisos"].extend(tempo.avisos)
+
+    # --- Aferição independente do Tc pela densidade de drenagem da bacia.
+    # É CONFERÊNCIA, não correção: o Tc continua saindo da correlação cruzada.
+    # Divergência aqui costuma ser informativa, não erro — estação de jusante
+    # soma o tempo de propagação no canal, que a relação de drenagem não cobre.
+    try:
+        import georisk_geo as gg
+        resposta["afericao_tc"] = gg.conferir_tc(
+            cadastro.get("bacia"), tempo.tc_horas, db_path
+        )
+    except Exception:
+        resposta["afericao_tc"] = None
 
     if tempo.tc_horas is None or tempo.tc_horas <= 0:
         resposta["grafico_hietograma_hidrograma"] = grafico_hietograma_hidrograma(

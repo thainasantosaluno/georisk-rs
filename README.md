@@ -183,6 +183,42 @@ Em Encantado no pico de 22/07, o escoamento passou de 38,4 para 35,5 mm.
 As duas tabelas de conversão (solo → grupo, uso × grupo → CN) continuam sendo
 **parâmetro documentado, não medição**, e ficam expostas no topo do módulo.
 
+## Geologia, estrutura e relevo
+
+Três camadas do BDIA/IBGE caracterizam cada bacia, com papéis deliberadamente
+diferentes:
+
+| Camada | Uso | Entra no cálculo? |
+|---|---|---|
+| `BDIA:geol_area` — litologia | Refina o grupo hidrológico **onde o solo é raso** | **Sim** |
+| `BDIA:geom_area` — densidade de drenagem | Afere o Tc obtido por correlação | Não — é conferência |
+| `geol_linha_falha` / `geol_linha_fratura` | Densidade de lineamentos (km/km²) | Não — é caracterização |
+
+**Litologia refinando o CN.** Neossolo Litólico e Cambissolo são rasos: ali a
+rocha decide. Sobre basalto maciço da Serra Geral o escoamento é alto (grupo D);
+sobre o arenito Botucatu a água infiltra (grupo A). Aplicar litologia em solo
+profundo seria errado — lá quem manda é o solo. O refino reclassificou 734
+pontos no Taquari (Cambissolo C→D) e o CN foi de 72,3 para 73,3.
+
+**Densidade de drenagem aferindo o Tc.** Não realimenta o cálculo; só diz se o
+Tc medido é compatível com o relevo. No Taquari (drenagem alta, esperado
+1–10 h): Santa Tereza mede 9,75 h e sai *compatível*; Estrela mede 17,25 h e
+sai *mais lento* — correto, porque estação de jusante soma o tempo de
+propagação no canal, que a relação de drenagem não cobre.
+
+**Lineamentos como caracterização.** Densidade de fraturamento é proxy
+reconhecido de permeabilidade secundária, mas **não existe coeficiente
+consagrado** que a converta em correção de Curve Number. Inventar esse fator
+repetiria o que este projeto passou a remover. O índice é calculado e exibido;
+a interpretação fica com quem tem referência da área.
+
+| Bacia | CN | Drenagem | Lineamentos |
+|---|---|---|---|
+| Taquari-Antas | 73,3 | alta | 0,169 km/km² |
+| Rio Caí | 74,8 | média | 0,175 km/km² |
+| Rio Uruguai | 74,8 | média | 0,129 km/km² |
+| Guaíba | 74,1 | alta | 0,154 km/km² |
+
 ## Aviso
 
 O traçado esquemático que sobrou como opção — senos e cossenos ao redor da

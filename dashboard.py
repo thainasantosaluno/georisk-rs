@@ -798,10 +798,14 @@ with tab_hidro:
 
         # --- Indicadores
         k1, k2, k3, k4 = st.columns(4)
+        aferic = resultado.get("afericao_tc")
         k1.metric(
             "Tempo de resposta (Tc)",
             f"{resultado['tc_horas']:.1f} h" if resultado["tc_horas"] else "Indeterminado",
-            help="Defasagem de maior correlação entre a chuva e a subida do rio.",
+            help="Defasagem de maior correlação entre a chuva e a subida do rio."
+                 + (f" Aferição pela densidade de drenagem ({aferic['densidade_drenagem']}): "
+                    f"esperado {aferic['tc_esperado_h'][0]:.0f}–{aferic['tc_esperado_h'][1]:.0f} h — "
+                    f"{aferic['veredito']}." if aferic else ""),
         )
         k2.metric("Cota atual", texto(resultado["cota_atual_cm"], " cm"))
         k3.metric(
@@ -961,11 +965,108 @@ with tab_hidro:
                     f"**{pico:.0f} cm** · tendência: {resultado.get('tendencia')}."
                 )
 
+        with st.expander("🪨 Geologia, estrutura e relevo da bacia"):
+            st.caption(
+                "Caracterização vinda do BDIA/IBGE. A **litologia** entra no "
+                "cálculo apenas onde o solo é raso — é ali que a rocha decide se "
+                "a água infiltra ou escorre. A **densidade de drenagem** serve de "
+                "aferição do Tc. A **densidade de lineamentos** é exibida como "
+                "caracterização: não existe coeficiente consagrado que a converta "
+                "em correção de CN, e inventar um seria arbitrário."
+            )
+
+            @st.cache_data(ttl=1800)
+            def _caracterizacao(bacia_rotulo: str | None) -> dict | None:
+                for c in gg.caracterizacoes():
+                    if gg._normalizar(c["nome"]) == gg._normalizar(bacia_rotulo):
+                        return c
+                return None
+
+            carac = _caracterizacao(resultado.get("bacia"))
+            if carac is None:
+                st.info(
+                    "Bacia ainda sem caracterização. Rode `python georisk_geo.py` "
+                    "para calcular (leva alguns minutos por bacia, e fica em cache)."
+                )
+            else:
+                g1, g2, g3 = st.columns(3)
+                g1.metric("Área da bacia", f"{carac['area_km2']:,.0f} km²".replace(",", "."))
+                g2.metric(
+                    "Densidade de drenagem",
+                    str(carac["geomorfologia"]["densidade_dominante"] or "—"),
+                )
+                g3.metric(
+                    "Lineamentos",
+                    f"{carac['densidade_lineamentos_km_km2']:.3f} km/km²",
+                    help="Falhas + fraturas dentro da bacia, por km².",
+                )
+
+                cga, cgb = st.columns(2)
+                with cga:
+                    st.markdown("**Unidades litoestratigráficas**")
+                    lit = carac["litologia"]["unidades"]
+                    total = sum(lit.values()) or 1
+                    st.dataframe(
+                        pd.DataFrame(
+                            [{"Unidade": k, "% da bacia": round(100 * v / total, 1)}
+                             for k, v in list(lit.items())[:8]]
+                        ),
+                        hide_index=True, use_container_width=True,
+                    )
+                with cgb:
+                    st.markdown("**Estruturas**")
+                    est = carac["estruturas"]
+                    st.dataframe(
+                        pd.DataFrame([
+                            {"Tipo": tipo.capitalize(), "Feições": v["n"],
+                             "km na bacia": v["km"], "km/km²": v["km_por_km2"]}
+                            for tipo, v in est.items()
+                        ]),
+                        hide_index=True, use_container_width=True,
+                    )
+                    st.markdown("**Aprofundamento da incisão**")
+                    inci = carac["geomorfologia"]["aprofundamento_incisao"]
+                    tot_i = sum(inci.values()) or 1
+                    st.dataframe(
+                        pd.DataFrame(
+                            [{"Classe": k, "%": round(100 * v / tot_i, 1)}
+                             for k, v in list(inci.items())[:4]]
+                        ),
+                        hide_index=True, use_container_width=True,
+                    )
+
+                if aferic:
+                    faixa = aferic["tc_esperado_h"]
+                    st.info(
+                        f"**Aferição do Tc** — densidade de drenagem "
+                        f"*{aferic['densidade_drenagem']}* faria esperar "
+                        f"{faixa[0]:.0f}–{faixa[1]:.0f} h; o medido foi "
+                        f"{aferic['tc_medido_h']:.1f} h, **{aferic['veredito']}**. "
+                        "Estação de jusante costuma ficar acima da faixa porque "
+                        "soma o tempo de propagação no canal.",
+                        icon="🧭",
+                    )
+
+                refino = (
+                    next((c["composicao"].get("refino_por_litologia")
+                          for c in gg.cns_calculados()
+                          if gg._normalizar(c["nome"]) == gg._normalizar(resultado.get("bacia"))),
+                         None)
+                )
+                if refino:
+                    st.caption(
+                        "Reclassificações de grupo hidrológico feitas pela litologia "
+                        "em solo raso: " + ", ".join(f"{k} ({v} pontos)" for k, v in refino.items())
+                    )
+
         with st.expander("🔬 Diagnóstico do modelo"):
             st.json(
                 {
                     "tc_horas": resultado["tc_horas"],
                     "metodo_tc": resultado["metodo_tc"],
+                    "cn_base": resultado.get("cn_base"),
+                    "cn_origem": resultado.get("cn_origem"),
+                    "afericao_tc": resultado.get("afericao_tc"),
                     "correlacao_chuva_nivel": resultado["correlacao_chuva_nivel"],
                     "ganho_sobre_persistencia": resultado["ganho_sobre_persistencia"],
                     "horizonte_util_horas": resultado["horizonte_util_horas"],
