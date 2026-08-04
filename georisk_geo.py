@@ -856,23 +856,41 @@ def preparar_tudo(db_path: str = CAMINHO_BANCO_PADRAO, progresso=None) -> dict:
         db_path, progresso=lambda f, m: avisar(0.42 + f * 0.12, m)
     )
 
-    cns = {}
+    cns, caracterizadas = {}, {}
     bacias = list(BACIAS_SACE)
+    fatia = 0.44 / len(bacias)
     for i, bacia in enumerate(bacias):
-        base = 0.55 + i * (0.44 / len(bacias))
+        base = 0.55 + i * fatia
         avisar(base, f"Calculando CN da bacia {bacia}…")
         try:
             r = calcular_cn_bacia(
                 bacia, db_path,
-                progresso=lambda f, m: avisar(base + f * (0.44 / len(bacias)), m),
+                progresso=lambda f, m: avisar(base + f * fatia * 0.6, m),
             )
             cns[bacia] = r["cn_medio"] if r else None
         except Exception as exc:
             cns[bacia] = None
             avisar(base, f"CN da bacia {bacia} falhou: {type(exc).__name__}")
 
+        # Caracterização geológica junto: a litologia refina o CN em solo raso
+        # e a densidade de drenagem afere o Tc. Roda aqui para o usuário não
+        # precisar lembrar de um segundo comando.
+        avisar(base + fatia * 0.6, f"Caracterizando a bacia {bacia}…")
+        try:
+            c = caracterizar_bacia(
+                bacia, db_path,
+                progresso=lambda f, m: avisar(base + fatia * (0.6 + f * 0.4), m),
+            )
+            caracterizadas[bacia] = (
+                c["geomorfologia"]["densidade_dominante"] if c else None
+            )
+        except Exception as exc:
+            caracterizadas[bacia] = None
+            avisar(base, f"Caracterização de {bacia} falhou: {type(exc).__name__}")
+
     avisar(1.0, "Camada geoespacial pronta.")
-    return {"manchas_sgb_novas": n_sgb, "manchas_defesa_civil_novas": n_dc, "cn_por_bacia": cns}
+    return {"manchas_sgb_novas": n_sgb, "manchas_defesa_civil_novas": n_dc,
+            "cn_por_bacia": cns, "densidade_drenagem_por_bacia": caracterizadas}
 
 
 # -----------------------------------------------------------------------------

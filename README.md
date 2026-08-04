@@ -194,6 +194,9 @@ diferentes:
 | `BDIA:geom_area` — densidade de drenagem | Afere o Tc obtido por correlação | Não — é conferência |
 | `geol_linha_falha` / `geol_linha_fratura` | Densidade de lineamentos (km/km²) | Não — é caracterização |
 
+Nada disso aparece como painel: o dado alimenta o cálculo em silêncio. A
+preparação roda junto com `python georisk_geo.py`.
+
 **Litologia refinando o CN.** Neossolo Litólico e Cambissolo são rasos: ali a
 rocha decide. Sobre basalto maciço da Serra Geral o escoamento é alto (grupo D);
 sobre o arenito Botucatu a água infiltra (grupo A). Aplicar litologia em solo
