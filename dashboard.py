@@ -365,50 +365,111 @@ def _candidatos_de_nome(linha) -> list[str]:
 
 
 def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
-                              mostrar_cota: bool, mostrar_evento: bool) -> dict:
-    """Desenha a mancha oficial de cada estação que tiver uma.
+                              mostrar_cota: bool, mostrar_evento: bool,
+                              camadas=("atencao", "alerta", "inundacao", "atual")) -> dict:
+    """Desenha as manchas OFICIAIS de cada estação, uma por nível de risco.
 
-    Para a mancha por cota, escolhe a maior cota mapeada que não passa da cota
-    medida agora — a leitura conservadora: a área de 750 cm está contida na de
-    765 cm, então mostrá-la não exagera o risco.
+    Em vez de uma mancha só, projeta as TRÊS COTAS DE RISCO da estação —
+    atenção (amarelo), alerta (laranja) e inundação (vermelho) — mais,
+    opcionalmente, a mancha do nível medido agora (azul-escuro).
+
+    Por que três e não uma: mostrar apenas a cota atual é enganoso em rio
+    baixo. Com Montenegro em 300 cm a única mancha compatível é a da calha, e
+    o mapa dá a impressão de que "a mancha é só o rio". As três cotas
+    respondem a pergunta que interessa ao operador — até onde a água chega SE
+    subir até cada limiar oficial.
+
+    As manchas são aninhadas (a de inundação contém a de alerta, que contém a
+    de atenção), então desenhamos da maior para a menor: assim todas ficam
+    visíveis, em vez de a maior cobrir as outras.
     """
     resumo = {"por_cota": [], "por_evento": [], "sem_mancha": []}
     ja_desenhado = set()
+
+    # Ordem de desenho: maior área primeiro (fica por baixo).
+    NIVEIS = [
+        ("inundacao", "cota_inundacao_cm", "Inundação", "#f44336", "#b71c1c"),
+        ("alerta", "cota_alerta_cm", "Alerta", "#ff9800", "#e65100"),
+        ("atencao", "cota_atencao_cm", "Atenção", "#ffeb3b", "#fbc02d"),
+    ]
 
     for _, est in estacoes.iterrows():
         nomes = _candidatos_de_nome(est)
         nivel = est.get("nivel_cm")
         nivel = None if nivel is None or pd.isna(nivel) else float(nivel)
-
         achou = False
 
-        if mostrar_cota and nivel is not None:
-            for nome in nomes:
-                mancha = _mancha_por_cota(nome, nivel)
-                if not mancha:
+        if mostrar_cota:
+            # --- As três cotas oficiais de risco
+            for chave_camada, campo, rotulo, preenche, borda in NIVEIS:
+                if chave_camada not in camadas:
                     continue
-                chave = ("cota", mancha["municipio"], mancha["cota_cm"])
-                if chave not in ja_desenhado:
+                limiar = est.get(campo)
+                if limiar is None or pd.isna(limiar):
+                    continue
+                limiar = float(limiar)
+
+                for nome in nomes:
+                    mancha = _mancha_por_cota(nome, limiar)
+                    if not mancha:
+                        continue
+                    chave = ("cota", mancha["municipio"], mancha["cota_cm"])
+                    if chave in ja_desenhado:
+                        achou = True
+                        break
                     folium.GeoJson(
                         mancha["geojson"],
-                        name=f"Mancha oficial {mancha['municipio']}",
-                        style_function=lambda _f, o=opacidade: {
-                            "fillColor": "#d32f2f", "color": "#b71c1c",
-                            "weight": 1.5, "fillOpacity": o,
+                        name=f"{rotulo} — {mancha['municipio']}",
+                        style_function=(
+                            lambda _f, o=opacidade, p=preenche, b=borda: {
+                                "fillColor": p, "color": b,
+                                "weight": 1.5, "fillOpacity": o,
+                            }
+                        ),
+                        tooltip=(
+                            f"<b>Cota de {rotulo} — {mancha['municipio']}</b><br>"
+                            f"Limiar oficial: {limiar:.0f} cm<br>"
+                            f"Mancha mapeada: {mancha['rotulo']}<br>"
+                            f"Nível agora: {nivel:.0f} cm<br>" if nivel is not None
+                            else f"<b>Cota de {rotulo} — {mancha['municipio']}</b><br>"
+                                 f"Limiar oficial: {limiar:.0f} cm<br>"
+                                 f"Mancha mapeada: {mancha['rotulo']}<br>"
+                        ) + f"<i>{mancha['fonte']}</i>",
+                    ).add_to(mapa)
+                    ja_desenhado.add(chave)
+                    resumo["por_cota"].append(
+                        f"{mancha['municipio']} {rotulo} ({int(mancha['cota_cm'])} cm)"
+                    )
+                    achou = True
+                    break
+
+            # --- Mancha do nível medido agora, por cima de todas
+            if "atual" in camadas and nivel is not None:
+                for nome in nomes:
+                    mancha = _mancha_por_cota(nome, nivel)
+                    if not mancha:
+                        continue
+                    chave = ("atual", mancha["municipio"], mancha["cota_cm"])
+                    if chave in ja_desenhado:
+                        achou = True
+                        break
+                    folium.GeoJson(
+                        mancha["geojson"],
+                        name=f"Nível atual — {mancha['municipio']}",
+                        style_function=lambda _f: {
+                            "fillColor": "#0d47a1", "color": "#01579b",
+                            "weight": 2.5, "fillOpacity": 0.0, "dashArray": "6,4",
                         },
                         tooltip=(
-                            f"<b>Mancha OFICIAL — {mancha['municipio']}</b><br>"
-                            f"{mancha['rotulo']}<br>"
-                            f"Nível medido: {nivel:.0f} cm<br>"
+                            f"<b>NÍVEL AGORA — {mancha['municipio']}</b><br>"
+                            f"Medido: {nivel:.0f} cm<br>"
+                            f"Mancha: {mancha['rotulo']}<br>"
                             f"<i>{mancha['fonte']}</i>"
                         ),
                     ).add_to(mapa)
                     ja_desenhado.add(chave)
-                    resumo["por_cota"].append(
-                        f"{mancha['municipio']} ({int(mancha['cota_cm'])} cm)"
-                    )
-                achou = True
-                break
+                    achou = True
+                    break
 
         if mostrar_evento:
             for nome in nomes:
@@ -421,8 +482,8 @@ def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
                         evento["geojson"],
                         name=f"Evento {evento['municipio']}",
                         style_function=lambda _f, o=opacidade: {
-                            "fillColor": "#1976d2", "color": "#0d47a1",
-                            "weight": 1.2, "fillOpacity": o * 0.7,
+                            "fillColor": "#7b1fa2", "color": "#4a148c",
+                            "weight": 1.2, "fillOpacity": o * 0.65,
                         },
                         tooltip=(
                             f"<b>{evento['municipio']} — {evento['rotulo']}</b><br>"
@@ -438,7 +499,6 @@ def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
             resumo["sem_mancha"].append(est.get("nome"))
 
     return resumo
-
 
 # -----------------------------------------------------------------------------
 tab_mapa, tab_manchas, tab_hidro = st.tabs(
@@ -559,16 +619,27 @@ with tab_manchas:
         )
 
         st.markdown("---")
-        st.markdown("#### 🎨 Camadas esquemáticas")
+        st.markdown("#### 🎨 Níveis de risco projetados")
         st.caption(
-            "Desenho ilustrativo ao redor da estação — **não** é mancha medida. "
-            "Serve onde não existe mancha oficial."
+            "Cada camada é a área que a água alcança SE o rio subir até aquele "
+            "limiar oficial. São aninhadas: inundação contém alerta, que contém "
+            "atenção."
         )
-        ver_esquematico = st.checkbox("Exibir esquemático", value=False)
-        ver_atencao = st.checkbox("🟡 Cota de Atenção", value=True, disabled=not ver_esquematico)
-        ver_alerta = st.checkbox("🟠 Cota de Alerta", value=True, disabled=not ver_esquematico)
-        ver_inundacao = st.checkbox("🔴 Cota de Inundação", value=True, disabled=not ver_esquematico)
-        ver_eixo_rio = st.checkbox("🟢 Eixo do Rio", value=True, disabled=not ver_esquematico)
+        ver_atencao = st.checkbox("🟡 Cota de Atenção", value=True)
+        ver_alerta = st.checkbox("🟠 Cota de Alerta", value=True)
+        ver_inundacao = st.checkbox("🔴 Cota de Inundação", value=True)
+        ver_atual = st.checkbox(
+            "🔵 Contorno do nível ATUAL", value=True,
+            help="Traço tracejado sobre a mancha correspondente ao nível medido agora.",
+        )
+        ver_eixo_rio = st.checkbox("🟢 Eixo do Rio (esquemático)", value=False)
+
+        st.markdown("---")
+        ver_esquematico = st.checkbox(
+            "Exibir desenho esquemático", value=False,
+            help="Senos e cossenos ao redor da estação. NÃO é mancha medida — "
+                 "serve só onde não há modelagem oficial.",
+        )
 
         st.markdown("---")
         opac_val = st.slider("Opacidade da Mancha (%):", 20, 100, 60) / 100.0
@@ -594,8 +665,15 @@ with tab_manchas:
         if so_criticas:
             alvos = alvos[alvos["cor"].isin(["gold", "orange", "red", "purple"])]
 
+        _camadas = tuple(
+            c for c, ligado in (
+                ("atencao", ver_atencao), ("alerta", ver_alerta),
+                ("inundacao", ver_inundacao), ("atual", ver_atual),
+            ) if ligado
+        )
         resumo_oficial = desenhar_manchas_oficiais(
-            mapa_sat, alvos, opac_val, ver_oficial_cota, ver_oficial_evento
+            mapa_sat, alvos, opac_val, ver_oficial_cota, ver_oficial_evento,
+            camadas=_camadas,
         )
 
         for _, est in (alvos.iterrows() if ver_esquematico else iter([])):
@@ -671,7 +749,26 @@ with tab_hidro:
 
     @st.cache_data(ttl=300, show_spinner="Modelando resposta da bacia…")
     def _analisar(estacao_id: str, cn: float) -> dict:
-        return gh.estimar_tempo_e_impacto_inundacao(estacao_id, cn_base=cn)
+        """Cacheia só os DADOS, nunca a figura.
+
+        Guardar o objeto Figure do Plotly no cache fazia o Streamlit reusar o
+        mesmo nó entre reruns e o React quebrava com
+        `NotFoundError: Failed to execute 'removeChild' on 'Node'`. A figura é
+        barata de remontar; a modelagem é que é cara.
+        """
+        resultado = gh.estimar_tempo_e_impacto_inundacao(estacao_id, cn_base=cn)
+        resultado.pop("grafico_hietograma_hidrograma", None)
+        return resultado
+
+    def _projecao_series(resultado: dict):
+        """Reconstrói a série de projeção a partir do dicionário cacheado."""
+        pontos = resultado.get("projecao") or []
+        if not pontos:
+            return None
+        return pd.Series(
+            [p["cota_projetada_cm"] for p in pontos],
+            index=pd.DatetimeIndex([p["instante"] for p in pontos]),
+        )
 
     elegiveis = _analisaveis()
 
@@ -741,11 +838,14 @@ with tab_hidro:
         for aviso in resultado["avisos"]:
             st.caption(f"• {aviso}")
 
-        # --- Gráfico hietograma x hidrograma
-        if resultado["grafico_hietograma_hidrograma"] is not None:
-            st.plotly_chart(
-                resultado["grafico_hietograma_hidrograma"], use_container_width=True
-            )
+        # --- Gráfico hietograma x hidrograma (remontado fora do cache)
+        figura = gh.grafico_hietograma_hidrograma(
+            gh.carregar_series_alinhadas(estacao_id),
+            gh.carregar_cadastro(estacao_id),
+            _projecao_series(resultado),
+            resultado["tc_horas"],
+        )
+        st.plotly_chart(figura, use_container_width=True, key=f"hidro_{estacao_id}")
 
         # --- Balanço volumétrico e detalhamento
         col_bal, col_proj = st.columns(2)
@@ -806,13 +906,60 @@ with tab_hidro:
                     hide_index=True, use_container_width=True,
                 )
             st.markdown("##### 🚦 Situação das cotas oficiais")
+            # Repetir "não atingida" três vezes não informa nada. O que o
+            # operador precisa saber é QUAL é o limiar, QUANTO falta para ele e
+            # se a projeção chega lá — por isso a tabela traz os números.
+            atual = resultado.get("cota_atual_cm")
+            pico = resultado.get("cota_maxima_projetada_cm")
+            linhas_limiar = []
+            for rotulo, campo, chave_tempo in (
+                ("🟡 Atenção", "cota_atencao_cm", "tempo_horas_ate_atencao"),
+                ("🟠 Alerta", "cota_alerta_cm", "tempo_horas_ate_alerta"),
+                ("🔴 Inundação", "cota_inundacao_cm", "tempo_horas_ate_inundacao"),
+            ):
+                limiar = resultado.get(campo)
+                if limiar is None or pd.isna(limiar):
+                    linhas_limiar.append(
+                        {"Cota": rotulo, "Limiar (cm)": None, "Falta (cm)": None,
+                         "Pico projetado alcança?": "sem cota oficial publicada",
+                         "Prazo": "—"}
+                    )
+                    continue
+
+                limiar = float(limiar)
+                falta = None if atual is None else round(limiar - float(atual))
+                horas = resultado.get(chave_tempo)
+
+                if falta is not None and falta <= 0:
+                    veredito, prazo = "JÁ ULTRAPASSADA", "agora"
+                elif horas is not None:
+                    veredito, prazo = "SIM", f"em ~{horas:.1f} h"
+                elif pico is not None:
+                    veredito = "não — falta {:.0f} cm no pico".format(limiar - float(pico))
+                    prazo = "—"
+                else:
+                    veredito, prazo = "sem projeção", "—"
+
+                linhas_limiar.append(
+                    {"Cota": rotulo, "Limiar (cm)": limiar, "Falta (cm)": falta,
+                     "Pico projetado alcança?": veredito, "Prazo": prazo}
+                )
+
             st.dataframe(
-                pd.DataFrame(
-                    list((resultado.get("status_limiares") or {}).items()),
-                    columns=["Cota", "Situação"],
-                ),
+                pd.DataFrame(linhas_limiar),
+                column_config={
+                    "Limiar (cm)": st.column_config.NumberColumn(format="%d"),
+                    "Falta (cm)": st.column_config.NumberColumn(
+                        format="%d", help="Quanto o rio ainda precisa subir."
+                    ),
+                },
                 hide_index=True, use_container_width=True,
             )
+            if atual is not None and pico is not None:
+                st.caption(
+                    f"Nível agora: **{atual:.0f} cm** · pico projetado: "
+                    f"**{pico:.0f} cm** · tendência: {resultado.get('tendencia')}."
+                )
 
         with st.expander("🔬 Diagnóstico do modelo"):
             st.json(

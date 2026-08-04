@@ -436,18 +436,27 @@ def mancha_para_cota(
         return None
     alvo = _normalizar(municipio)
     criar_schema_geo(db_path)
+    # DOIS PASSOS DE PROPÓSITO: primeiro só os metadados (leves), e só depois o
+    # GeoJSON da única mancha escolhida. Buscar `geojson` junto com o filtro
+    # traria os megabytes de TODAS as manchas candidatas a cada chamada —
+    # centenas de MB por rerun do Streamlit.
     with _conectar(db_path) as con:
-        linhas = con.execute(
+        candidatas = con.execute(
             # O critério é ter COTA, não o grupo em que o SGB arquivou:
             # as manchas de Uruguaiana ficam sob "EVENTOS" mas são indexadas
             # por cota (833, 952, 1205 e 1252 cm) e servem igual.
-            "SELECT municipio, fonte, rotulo, cota_cm, geojson, url_origem "
+            "SELECT id, municipio, fonte, rotulo, cota_cm, url_origem "
             "FROM mancha_oficial WHERE cota_cm IS NOT NULL AND cota_cm <= ? "
             "ORDER BY cota_cm DESC",
             (cota_cm,),
         ).fetchall()
-    for mun, fonte, rotulo, cota, geo, url in linhas:
-        if _normalizar(mun) == alvo:
+
+        for ident, mun, fonte, rotulo, cota, url in candidatas:
+            if _normalizar(mun) != alvo:
+                continue
+            geo = con.execute(
+                "SELECT geojson FROM mancha_oficial WHERE id=?", (ident,)
+            ).fetchone()[0]
             return {"municipio": mun, "fonte": fonte, "rotulo": rotulo,
                     "cota_cm": cota, "geojson": json.loads(geo), "url_origem": url}
     return None
@@ -460,12 +469,16 @@ def mancha_de_evento(
     alvo = _normalizar(municipio)
     criar_schema_geo(db_path)
     with _conectar(db_path) as con:
-        linhas = con.execute(
-            "SELECT municipio, fonte, rotulo, geojson, url_origem "
+        candidatas = con.execute(
+            "SELECT id, municipio, fonte, rotulo, url_origem "
             "FROM mancha_oficial WHERE tipo='evento' AND cota_cm IS NULL"
         ).fetchall()
-    for mun, fonte, rotulo, geo, url in linhas:
-        if _normalizar(mun) == alvo:
+        for ident, mun, fonte, rotulo, url in candidatas:
+            if _normalizar(mun) != alvo:
+                continue
+            geo = con.execute(
+                "SELECT geojson FROM mancha_oficial WHERE id=?", (ident,)
+            ).fetchone()[0]
             return {"municipio": mun, "fonte": fonte, "rotulo": rotulo,
                     "geojson": json.loads(geo), "url_origem": url}
     return None
