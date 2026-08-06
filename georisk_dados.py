@@ -45,6 +45,7 @@ import json
 import re
 import sqlite3
 import threading
+import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -87,6 +88,10 @@ ICONE_PARA_SITUACAO = {
 }
 
 TEMPO_LIMITE = 60
+
+# Repetição em falha transitória de rede. Ver `_baixar()` para o motivo.
+TENTATIVAS = 3
+ESPERA_INICIAL = 2.0   # segundos; dobra a cada tentativa (2, 4, 8…)
 _local = threading.local()
 
 
@@ -101,13 +106,50 @@ def _sessao() -> requests.Session:
     return s
 
 
-def _baixar(url: str) -> str:
-    """GET com detecção de charset pelo cabeçalho (o SGB mistura ISO-8859-1 e UTF-8)."""
-    r = _sessao().get(url, timeout=TEMPO_LIMITE)
-    r.raise_for_status()
-    m = re.search(r"charset=([\w-]+)", r.headers.get("content-type", ""), re.I)
-    r.encoding = m.group(1) if m else "utf-8"
-    return r.text
+def _baixar(url: str, tentativas: int = TENTATIVAS, espera: float = ESPERA_INICIAL) -> str:
+    """GET com detecção de charset e REPETIÇÃO em falha transitória.
+
+    Por que existe a repetição: as duas primeiras execuções agendadas no
+    GitHub Actions falharam com o MESMO código que depois rodou três vezes
+    seguidas sem alteração nenhuma. Ou seja, foi indisponibilidade momentânea
+    do SGB ou da ANA — servidores que já recusaram conexão durante o
+    desenvolvimento.
+
+    O coletor já tolera uma fonte individual cair (registra em `erros` e
+    segue), mas a primeira requisição de cada fonte é fatal: sem a lista de
+    bacias ou o cadastro da ANA não há o que coletar, e a rodada inteira se
+    perde. Três tentativas com espera crescente cobrem a falha passageira sem
+    mascarar indisponibilidade real — se a fonte estiver mesmo fora, o erro
+    sobe igual, só que depois de ter dado chance.
+
+    Não repete em erro 4xx: se o servidor diz que a URL não existe ou que o
+    acesso é proibido, insistir não muda nada e só gasta tempo.
+    """
+    ultimo_erro: Exception | None = None
+
+    for tentativa in range(1, tentativas + 1):
+        try:
+            r = _sessao().get(url, timeout=TEMPO_LIMITE)
+            # 4xx é definitivo: não adianta insistir.
+            if 400 <= r.status_code < 500:
+                r.raise_for_status()
+            if r.status_code >= 500:
+                raise requests.HTTPError(f"HTTP {r.status_code} em {url}")
+            m = re.search(r"charset=([\w-]+)", r.headers.get("content-type", ""), re.I)
+            r.encoding = m.group(1) if m else "utf-8"
+            return r.text
+        except requests.HTTPError as exc:
+            resposta = getattr(exc, "response", None)
+            if resposta is not None and 400 <= resposta.status_code < 500:
+                raise
+            ultimo_erro = exc
+        except (requests.ConnectionError, requests.Timeout, OSError) as exc:
+            ultimo_erro = exc
+
+        if tentativa < tentativas:
+            time.sleep(espera * (2 ** (tentativa - 1)))  # 2 s, 4 s, 8 s…
+
+    raise ultimo_erro if ultimo_erro else RuntimeError(f"Falha ao baixar {url}")
 
 
 def _agora() -> str:
