@@ -191,6 +191,52 @@ if so_com_dado:
 
 df_fluvio = df_f[df_f["tipo"] == "FLUVIOMETRICA"].copy()
 
+def avisar_defasagem(df: pd.DataFrame, limite_horas: float = 3.0) -> None:
+    """Avisa quando uma fonte ficou para trás das outras.
+
+    Existe porque é fácil coletar só o SACE (mais rápido) e esquecer que as
+    ~500 estações da ANA continuam no mapa com a leitura da coleta anterior.
+    O painel mostrava o horário da ÚLTIMA coleta e dava a impressão de que
+    tudo ali era daquele momento — enquanto metade do mapa podia estar com
+    dado de dois dias antes.
+    """
+    if "atualizado_em" not in df or df["atualizado_em"].isna().all():
+        return
+
+    quando = pd.to_datetime(df["atualizado_em"], errors="coerce")
+    por_fonte = (
+        df.assign(_quando=quando)
+        .dropna(subset=["_quando"])
+        .groupby("fonte")["_quando"]
+        .agg(["max", "count"])
+        .sort_values("max")
+    )
+    if len(por_fonte) < 2:
+        return
+
+    mais_nova = por_fonte["max"].max()
+    atrasadas = por_fonte[
+        (mais_nova - por_fonte["max"]) > pd.Timedelta(hours=limite_horas)
+    ]
+    if atrasadas.empty:
+        return
+
+    detalhe = " · ".join(
+        f"**{fonte}**: {int(linha['count'])} estações paradas em "
+        f"{linha['max']:%d/%m %H:%M} "
+        f"({(mais_nova - linha['max']).total_seconds() / 3600:.0f} h atrás)"
+        for fonte, linha in atrasadas.iterrows()
+    )
+    st.warning(
+        f"⏳ **Fontes fora de sincronia.** {detalhe}. Elas continuam no mapa "
+        "com a leitura antiga. Para igualar, marque *Incluir telemetria da ANA* "
+        "na barra lateral e clique em **Atualizar agora**.",
+        icon="⏳",
+    )
+
+
+avisar_defasagem(df)
+
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Estações no painel", len(df_f))
 m2.metric("Inundação 🔴", int((df_f["cor"] == "red").sum()))
