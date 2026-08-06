@@ -66,6 +66,17 @@ MUNICIPIOS_RS_COORDS = {
 
 
 # -----------------------------------------------------------------------------
+# COMPORTAMENTO DA ATUALIZAÇÃO — fixo, sem controle na tela
+# -----------------------------------------------------------------------------
+# Eram caixas de seleção. Viraram constantes porque a escolha errada tinha
+# consequência silenciosa: sem a ANA, 500 estações ficavam com leitura de dias
+# atrás no mesmo mapa das atualizadas; sem a atualização, o painel mostrava
+# dado velho sem sinal nenhum. 15 min é o ritmo em que o SACE republica.
+INTERVALO_ATUALIZACAO_MIN = 15
+INCLUIR_ANA = True
+
+
+# -----------------------------------------------------------------------------
 # 2. COLETA / ATUALIZAÇÃO (a ligação com as fontes reais mora aqui)
 # -----------------------------------------------------------------------------
 def executar_coleta(incluir_ana: bool) -> None:
@@ -108,19 +119,13 @@ with st.sidebar:
     else:
         st.warning("Nenhuma coleta ainda. Clique em **Atualizar agora**.")
 
-    # Ligado por padrão: o painel se mantém atualizado sozinho.
-    auto = st.checkbox("Atualização automática", value=True)
-    intervalo_min = st.number_input(
-        "Reatualizar a cada (min):", min_value=5, max_value=180, value=15, step=5
-    )
-    # Marcada por padrão: deixá-la de fora produzia o descompasso que o aviso
-    # de defasagem denuncia — SACE de hoje e 500 estações de anteontem juntas.
-    incluir_ana = st.checkbox(
-        "Incluir telemetria da ANA (mais lento, +500 estações)", value=True
+    st.caption(
+        f"🔄 Atualiza sozinho a cada **{INTERVALO_ATUALIZACAO_MIN} min**, "
+        "com SACE + telemetria da ANA."
     )
 
     if st.button("⬇️ Atualizar agora", use_container_width=True, type="primary"):
-        executar_coleta(incluir_ana)
+        executar_coleta(INCLUIR_ANA)
 
     st.divider()
     st.caption(
@@ -133,19 +138,14 @@ with st.sidebar:
 
 @st.fragment(run_every="60s")
 def vigia_atualizacao() -> None:
-    """Roda sozinho a cada minuto; só dispara a coleta quando o dado envelhece.
+    """Roda sozinho a cada minuto; só coleta quando o dado passa do intervalo.
     Fica num fragmento para não travar o resto da página."""
-    if not auto:
-        return
     idade_atual = gd.idade_dados()
-    if idade_atual is None or idade_atual > timedelta(minutes=int(intervalo_min)):
+    if idade_atual is None or idade_atual > timedelta(minutes=INTERVALO_ATUALIZACAO_MIN):
         with st.spinner("Atualização automática em andamento…"):
-            gd.sincronizar(incluir_ana=incluir_ana)
+            gd.sincronizar(incluir_ana=INCLUIR_ANA)
         st.cache_data.clear()
         st.rerun(scope="app")
-    else:
-        restante = int(intervalo_min) - int(idade_atual.total_seconds() // 60)
-        st.caption(f"⏱️ Atualização automática ligada — próxima em ~{max(restante, 0)} min.")
 
 
 # -----------------------------------------------------------------------------

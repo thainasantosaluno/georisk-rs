@@ -73,6 +73,26 @@ MUNICIPIOS_RS_COORDS = {
 
 
 # -----------------------------------------------------------------------------
+# COMPORTAMENTO DA ATUALIZAÇÃO — fixo, sem controle na tela
+# -----------------------------------------------------------------------------
+# Estes dois eram caixas de seleção na barra lateral. Viraram constantes porque
+# a escolha errada tinha consequência silenciosa e ninguém percebia:
+#
+#   - deixar a ANA de fora produzia o descompasso que o aviso de defasagem
+#     denuncia: SACE de hoje e 500 estações de anteontem no mesmo mapa, com
+#     aparência de dado atual;
+#   - deixar a atualização desligada fazia o painel mostrar dado velho sem
+#     nenhum sinal disso.
+#
+# 15 min é o piso útil: o SACE republica nesse ritmo, então buscar mais rápido
+# não traz nada novo e só bate no servidor deles à toa.
+#
+# Para mudar, edite aqui — é decisão de projeto, não de uso no dia a dia.
+INTERVALO_ATUALIZACAO_MIN = 15
+INCLUIR_ANA = True
+
+
+# -----------------------------------------------------------------------------
 # 2. CARREGAMENTO DOS DADOS REAIS (substitui o antigo CATALOGO_SACE)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=30)
@@ -115,21 +135,13 @@ with st.sidebar:
     else:
         st.warning("Banco vazio. Rode uma coleta.")
 
-    # LIGADOS POR PADRÃO: o painel se mantém atualizado sozinho, sem exigir
-    # que ninguém lembre de marcar nada.
-    #
-    # A ANA vem marcada porque deixá-la de fora é o que produzia o descompasso
-    # que o aviso de defasagem denuncia: SACE de hoje e 500 estações de
-    # anteontem, no mesmo mapa, com cara de dado atual.
-    #
-    # 15 min é o piso útil: o SACE republica nesse ritmo, então buscar mais
-    # rápido não traz nada novo e só bate no servidor deles à toa.
-    incluir_ana = st.checkbox("Incluir telemetria da ANA (+500 estações)", value=True)
-    auto = st.checkbox("Atualização automática", value=True)
-    intervalo_min = st.number_input("A cada (min):", 5, 180, 15, step=5)
+    st.caption(
+        f"🔄 Atualiza sozinho a cada **{INTERVALO_ATUALIZACAO_MIN} min**, "
+        "com SACE + telemetria da ANA."
+    )
 
     if st.button("⬇️ Atualizar agora", use_container_width=True, type="primary"):
-        atualizar(incluir_ana)
+        atualizar(INCLUIR_ANA)
 
     st.divider()
     st.caption(
@@ -141,12 +153,11 @@ with st.sidebar:
 
 @st.fragment(run_every="60s")
 def vigia() -> None:
-    if not auto:
-        return
+    """Acorda a cada minuto e coleta quando o dado passa do intervalo."""
     atual = gd.idade_dados()
-    if atual is None or atual > timedelta(minutes=int(intervalo_min)):
+    if atual is None or atual > timedelta(minutes=INTERVALO_ATUALIZACAO_MIN):
         with st.spinner("Atualização automática…"):
-            gd.sincronizar(incluir_ana=incluir_ana)
+            gd.sincronizar(incluir_ana=INCLUIR_ANA)
         st.cache_data.clear()
         st.rerun(scope="app")
 
