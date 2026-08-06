@@ -79,11 +79,49 @@ coletor descarta e registra o motivo em `observacao`:
   (ex.: 88.130 = 881,30 m em Vacaria), não régua fluviométrica em cm;
 - o valor-sentinela `9999` significa "sem medição".
 
-## Atualização automática
+## Atualização automática e arquivo histórico
 
-O workflow `.github/workflows/coleta.yml` roda de 3 em 3 horas, coleta das
-fontes reais e versiona o snapshot em `dados/`. O banco SQLite não é commitado
-(40+ MB, binário, reconstruível em ~2 min).
+O workflow `.github/workflows/coleta.yml` roda de 3 em 3 horas, independente da
+sua máquina, e versiona dois produtos em `dados/`:
+
+| Arquivo | O que é | Resolução |
+|---|---|---|
+| `estacoes.csv` / `.json` | Retrato do estado atual das 565 estações | a cada 3 h |
+| `serie/AAAA-MM.csv.gz` | **Arquivo histórico** da série medida | 15 min |
+
+O banco SQLite não é commitado (binário, grande, reconstruível).
+
+### Por que o arquivo mensal existe
+
+O SACE publica uma **janela móvel de ~30 dias**. O que sai dessa janela some da
+fonte. Antes, o banco apenas espelhava essa janela — cada coleta apagava a série
+e regravava —, então a cheia de julho de 2026 deixaria de existir no projeto em
+meados de agosto. Para um trabalho que analisa eventos meses depois, isso é
+perda de dado primário.
+
+Agora a série **acumula**: o `INSERT OR REPLACE` com chave
+`(estação, grandeza, datahora)` já corrige valor revisado pela fonte sem
+destruir o passado, e o purge foi removido.
+
+O arquivo vive no Git, não só no banco, porque quem coleta com tudo fechado é o
+runner do GitHub — que nasce vazio e é destruído a cada execução, sem banco para
+acumular. O exportador só reescreve os meses presentes no banco, unindo com o
+que já estava versionado; mês antigo não é tocado.
+
+Verificado nos dois cenários: apagando julho do banco e reexportando, e rodando
+a coleta num runner sem banco nenhum — as 200.095 linhas de julho sobreviveram
+intactas nas duas vezes. Comprimido, o mês fica em 0,67 MB.
+
+### Máquina nova
+
+```bash
+git clone https://github.com/thainasantosaluno/georisk-rs.git
+pip install -r requirements.txt
+python georisk_dados.py --importar-arquivo   # recupera o histórico versionado
+python georisk_dados.py                      # coleta o estado atual
+```
+
+Sem o `--importar-arquivo` você teria só os 30 dias que a fonte publica hoje.
 
 ## Módulo hidrológico
 

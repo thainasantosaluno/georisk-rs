@@ -936,8 +936,21 @@ def _gravar(estacoes: list[dict]) -> None:
                         series.append(
                             (est["id"], grandeza, quando, numero, UNIDADES[grandeza])
                         )
-                # Série nova substitui a anterior por completo.
-                purgar.add((est["id"], grandeza))
+                # NÃO purga: a série ACUMULA.
+                #
+                # Antes cada coleta apagava a série inteira da estação e
+                # regravava a janela nova. O banco virava um espelho dos ~30
+                # dias que o SACE publica, e o que a fonte descartava sumia
+                # para sempre — a cheia de julho de 2026, por exemplo, deixaria
+                # de existir em meados de agosto.
+                #
+                # O purge era desnecessário: a chave primária é
+                # (id_estacao, grandeza, datahora), então o INSERT OR REPLACE
+                # já corrige valor revisado pela fonte no mesmo instante, sem
+                # destruir o histórico anterior à janela.
+                #
+                # Purga continua acontecendo em UM caso, logo acima: série de
+                # chuva rejeitada por implausibilidade, que precisa mesmo sair.
 
     with conectar() as con:
         if purgar:
@@ -1138,6 +1151,110 @@ def coletar_inmet() -> tuple[list[dict], list[str]]:
     return [], ["INMET: endpoints de leitura indisponíveis sem token (204/404)."]
 
 
+def exportar_series_mensais(pasta: str | Path = "dados/serie") -> list[Path]:
+    """Arquiva a série de 15 min em CSV mensal comprimido, versionado no Git.
+
+    POR QUE ISTO EXISTE
+    -------------------
+    O SACE publica uma janela móvel de ~30 dias. O que sai dessa janela some da
+    fonte — e, quando o banco apenas espelhava a janela, sumia do projeto
+    também. Para um trabalho que vai analisar eventos meses depois, isso é
+    perda de dado primário.
+
+    POR QUE NO GIT E NÃO SÓ NO BANCO
+    --------------------------------
+    O banco fica só na máquina, e a coleta que roda com tudo fechado é a do
+    GitHub Actions — cujo runner começa vazio a cada execução e é destruído no
+    fim. Ele não tem banco para acumular. Gravando arquivo mensal versionado, a
+    própria nuvem constrói o arquivo histórico, sem depender do seu computador
+    estar ligado.
+
+    COMO SE COMPORTA
+    ----------------
+    Um arquivo por mês (`2026-07.csv.gz`). A cada execução, o mês corrente é
+    reescrito com a união do que já estava arquivado e do que veio agora —
+    valores revisados pela fonte substituem os antigos, medições novas entram,
+    e nada some. Meses fechados não são tocados.
+
+    Tamanho: ~225 mil linhas/mês, que comprimidas ficam na casa de 1 a 2 MB.
+    """
+    destino = Path(pasta)
+    destino.mkdir(parents=True, exist_ok=True)
+
+    with conectar() as con:
+        df = pd.read_sql_query(
+            "SELECT id_estacao, grandeza, datahora, valor, unidade FROM serie "
+            "ORDER BY id_estacao, grandeza, datahora",
+            con,
+        )
+    if df.empty:
+        return []
+
+    df["_mes"] = df["datahora"].str.slice(0, 7)          # 'YYYY-MM'
+    df = df[df["_mes"].str.match(r"^\d{4}-\d{2}$", na=False)]
+
+    gerados: list[Path] = []
+    chaves = ["id_estacao", "grandeza", "datahora"]
+
+    for mes, bloco in df.groupby("_mes"):
+        caminho = destino / f"{mes}.csv.gz"
+        bloco = bloco.drop(columns=["_mes"])
+
+        if caminho.exists():
+            try:
+                anterior = pd.read_csv(caminho, compression="gzip", dtype=str)
+                anterior["valor"] = pd.to_numeric(anterior["valor"], errors="coerce")
+                # `keep="last"` = o que veio agora prevalece sobre o arquivado,
+                # para absorver revisão da fonte no mesmo instante de medição.
+                bloco = (
+                    pd.concat([anterior, bloco], ignore_index=True)
+                    .drop_duplicates(subset=chaves, keep="last")
+                    .sort_values(chaves)
+                )
+            except Exception:
+                pass  # arquivo corrompido: reescreve com o que temos agora
+
+        bloco.to_csv(caminho, index=False, compression="gzip")
+        gerados.append(caminho)
+
+    return gerados
+
+
+def importar_series_arquivadas(pasta: str | Path = "dados/serie") -> int:
+    """Recarrega os arquivos mensais para dentro do banco.
+
+    É o caminho de volta: em máquina nova, `git clone` traz os arquivos e esta
+    função reconstrói o histórico completo — inclusive o que o SACE já
+    descartou e que uma coleta nova jamais recuperaria.
+    """
+    origem = Path(pasta)
+    if not origem.exists():
+        return 0
+
+    criar_schema()
+    total = 0
+    for caminho in sorted(origem.glob("*.csv.gz")):
+        try:
+            df = pd.read_csv(caminho, compression="gzip")
+        except Exception:
+            continue
+        linhas = [
+            (r.id_estacao, r.grandeza, r.datahora, _float(r.valor), r.unidade)
+            for r in df.itertuples()
+            if _float(r.valor) is not None
+        ]
+        if not linhas:
+            continue
+        with conectar() as con:
+            con.executemany(
+                "INSERT OR REPLACE INTO serie "
+                "(id_estacao, grandeza, datahora, valor, unidade) VALUES (?,?,?,?,?)",
+                linhas,
+            )
+        total += len(linhas)
+    return total
+
+
 def exportar_snapshot(pasta: str | Path = "dados") -> list[Path]:
     """Publica o estado atual no FORMATO PADRÃO ÚNICO (CSV + JSON).
 
@@ -1182,7 +1299,16 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
     ap = argparse.ArgumentParser(description="Coletor GeoRisk-RS (dados reais).")
     ap.add_argument("--sem-ana", action="store_true", help="coletar só o SACE (mais rápido)")
     ap.add_argument("--exportar", action="store_true", help="gerar dados/ em CSV+JSON")
+    ap.add_argument("--importar-arquivo", action="store_true",
+                    help="recarregar dados/serie/*.csv.gz para o banco (maquina nova)")
     args = ap.parse_args()
+
+    if args.importar_arquivo:
+        # Ação isolada: reconstruir o banco a partir do arquivo versionado,
+        # sem coletar. É o passo de máquina nova, depois do `git clone`.
+        n = importar_series_arquivadas()
+        print(f"{n:,} registros históricos recarregados de dados/serie/")
+        raise SystemExit(0)
 
     resumo = sincronizar(
         incluir_ana=not args.sem_ana,
@@ -1197,3 +1323,5 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
     if args.exportar:
         for caminho in exportar_snapshot():
             print("exportado:", caminho)
+        for caminho in exportar_series_mensais():
+            print("arquivado:", caminho)

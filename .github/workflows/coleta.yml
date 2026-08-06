@@ -38,7 +38,12 @@ jobs:
         # O coletor não precisa de streamlit/folium/plotly — só do essencial.
         run: pip install pandas requests urllib3
 
-      - name: Coletar dados reais e exportar snapshot
+      - name: Coletar dados reais, exportar snapshot e arquivar série
+        # O runner nasce vazio e morre a cada execução, então o banco aqui só
+        # tem a janela de 30 dias que a fonte publica agora. O arquivo mensal
+        # em dados/serie/ sobrevive porque vem do próprio repositório: o
+        # exportador só reescreve os meses presentes no banco, unindo com o que
+        # já estava versionado. Mês antigo não é tocado.
         run: python georisk_dados.py --exportar
 
       - name: Publicar snapshot se houve mudança
