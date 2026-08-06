@@ -489,14 +489,132 @@ def _minimos_quadrados_regularizados(
         return np.linalg.pinv(A) @ b
 
 
+# -----------------------------------------------------------------------------
+# PROPAGAÇÃO DE ONDA DE CHEIA — montante -> jusante
+# -----------------------------------------------------------------------------
+# O ponto que faltava. Para estação de jusante, a chuva medida no próprio local
+# quase não explica o nível: a água que passa ali caiu na cabeceira horas antes.
+# Medido nos 30 dias do Taquari, prevendo Estrela:
+#
+#     chuva local de Estrela ......... r = 0,081   (inútil)
+#     nível de Santa Tereza .......... r = 0,527
+#     nível de Muçum ................. r = 0,602
+#     nível de Encantado ............. r = 0,646   (8x melhor que a chuva local)
+#
+# E os tempos de viagem se somam, como onda de cheia deve fazer:
+#
+#     Santa Tereza -> Muçum 2,75 h -> Encantado 2,25 h -> Estrela 4,25 h
+#              -> Bom Retiro do Sul 1,75 h -> Taquari 2,25 h   (soma 13,25 h)
+#     Santa Tereza -> Taquari, medido direto ................. 14,25 h
+#
+# É isso que responde "quanto tempo a chuva que caiu lá em cima leva para
+# chegar aqui embaixo" — a pergunta central do estudo.
+
+# Só entram como preditor pares com correlação acima disto.
+CORRELACAO_MINIMA_MONTANTE = 0.35
+
+# Quantas estações de montante usar por estação (as de maior correlação).
+MAXIMO_MONTANTE = 2
+
+# Uma estação a jusante responde depois; lag zero significaria mesma seção.
+LAG_MINIMO_HORAS = 0.25
+LAG_MAXIMO_HORAS = 48.0
+
+
+def _lag_entre_series(a: pd.Series, b: pd.Series,
+                      maximo_horas: float = LAG_MAXIMO_HORAS) -> tuple[float, float]:
+    """Defasagem que maximiza a correlação entre a SUBIDA de A e a de B.
+
+    Correlaciona dH/dt e não o nível: o nível carrega o patamar do evento
+    anterior e faria pares distantes parecerem correlacionados sem relação
+    causal. A subida isola a passagem da onda.
+    """
+    idx = a.index.intersection(b.index)
+    if len(idx) < 500:
+        return 0.0, -1.0
+
+    x = a.reindex(idx).interpolate(limit=8).diff().fillna(0.0).to_numpy()
+    y = b.reindex(idx).interpolate(limit=8).diff().fillna(0.0).to_numpy()
+
+    melhor_lag, melhor_r = 0.0, -1.0
+    for passos in range(0, int(maximo_horas * PASSOS_POR_HORA) + 1):
+        xa, ya = (x, y) if passos == 0 else (x[:-passos], y[passos:])
+        if xa.std() == 0 or ya.std() == 0:
+            continue
+        r = float(np.corrcoef(xa, ya)[0, 1])
+        if r > melhor_r:
+            melhor_lag, melhor_r = passos / PASSOS_POR_HORA, r
+    return melhor_lag, melhor_r
+
+
+def descobrir_montante(
+    estacao_id: str, db_path: str = CAMINHO_BANCO_PADRAO, dias: int = 30
+) -> list[dict]:
+    """Descobre, pelos dados, quais estações são de montante e o tempo de viagem.
+
+    Não usa topologia de rede nem ordem de rio: varre as estações da MESMA
+    bacia e mede qual delas antecipa a subida desta, e por quanto tempo. Sai
+    ordenado por correlação.
+
+    Devolve dicionários com `estacao_id`, `nome`, `lag_horas`, `correlacao` e
+    a série já carregada em `_serie`, pronta para virar preditor.
+    """
+    cadastro = carregar_cadastro(estacao_id, db_path)
+    bacia = cadastro.get("bacia")
+    if not bacia:
+        return []
+
+    with _conectar(db_path) as con:
+        vizinhas = con.execute(
+            "SELECT id, nome FROM estacao WHERE bacia = ? AND id != ? "
+            "AND fonte = 'SACE/SGB'",
+            (bacia, estacao_id),
+        ).fetchall()
+
+    alvo = carregar_series_alinhadas(estacao_id, db_path, dias=dias)
+    if alvo.empty or "cota_cm" not in alvo or alvo["cota_cm"].isna().all():
+        return []
+
+    achados: list[dict] = []
+    for vid, vnome in vizinhas:
+        serie = carregar_series_alinhadas(vid, db_path, dias=dias)
+        if serie.empty or "cota_cm" not in serie or serie["cota_cm"].isna().all():
+            continue
+
+        lag, r = _lag_entre_series(serie["cota_cm"], alvo["cota_cm"])
+        # lag > 0 e correlação alta = ela sobe ANTES desta: está a montante.
+        if r >= CORRELACAO_MINIMA_MONTANTE and lag >= LAG_MINIMO_HORAS:
+            achados.append({
+                "estacao_id": vid,
+                "nome": vnome,
+                "lag_horas": round(lag, 2),
+                "correlacao": round(r, 3),
+                "_serie": serie["cota_cm"],
+            })
+
+    achados.sort(key=lambda d: -d["correlacao"])
+    return achados[:MAXIMO_MONTANTE]
+
+
 def _montar_preditores(
-    df: pd.DataFrame, acumulados: pd.DataFrame, chuva_efetiva: pd.Series
+    df: pd.DataFrame,
+    acumulados: pd.DataFrame,
+    chuva_efetiva: pd.Series,
+    montante: list[dict] | None = None,
 ) -> pd.DataFrame:
     """Matriz de preditores, alinhada no tempo.
 
-    Colunas: cota atual, taxa de subida recente, acumulados de todas as janelas
-    e chuva efetiva. Termo quadrático na chuva efetiva porque a relação
-    volume -> cota é notoriamente não linear (calha extravasa e a curva achata).
+    Colunas: cota atual, taxa de subida recente, acumulados de todas as janelas,
+    chuva efetiva e — quando existirem — o NÍVEL DAS ESTAÇÕES DE MONTANTE,
+    deslocado pelo tempo de viagem da onda.
+
+    Por que montante entra: para estação de jusante, a chuva medida no próprio
+    local quase não explica o nível. Medido nos 30 dias do Taquari, prevendo
+    Estrela — chuva local r=0,08; nível de Encantado r=0,65, oito vezes melhor.
+    A água que passa em Estrela caiu na Serra horas antes, não ali.
+
+    Termo quadrático na chuva efetiva porque a relação volume -> cota é
+    notoriamente não linear (a calha extravasa e a curva achata).
     """
     preditores = pd.DataFrame(index=df.index)
     preditores["cota_atual"] = df["cota_cm"]
@@ -505,6 +623,21 @@ def _montar_preditores(
         preditores[f"p{horas}h"] = acumulados[f"p{horas}h"]
     preditores["pe_mm"] = chuva_efetiva
     preditores["pe_mm2"] = chuva_efetiva ** 2
+
+    for i, mont in enumerate(montante or [], start=1):
+        serie = mont.get("_serie")
+        if serie is None or serie.empty:
+            continue
+        # Desloca pelo tempo de viagem: o que está subindo lá agora chega aqui
+        # daqui a `lag_horas`, então é o valor de `lag_horas` ATRÁS que informa
+        # o nível de agora.
+        passos = max(1, int(round(mont["lag_horas"] * PASSOS_POR_HORA)))
+        alinhada = serie.reindex(df.index).interpolate(limit=8)
+        preditores[f"montante{i}_cota"] = alinhada.shift(passos)
+        preditores[f"montante{i}_subida"] = (
+            alinhada.diff(3 * PASSOS_POR_HORA).shift(passos)
+        )
+
     return preditores
 
 
@@ -817,6 +950,10 @@ def estimar_tempo_e_impacto_inundacao(
         "correlacao_chuva_nivel": None,
         "metodo_tc": None,
         "afericao_tc": None,
+        "montante": [],
+        "preditores_escolhidos": None,
+        "preditores_n": None,
+        "usou_montante": None,
         "precipitacao_acumulada_mm": {},
         "volume_efetivo_mm": None,
         "balanco_hidrico": None,
@@ -898,7 +1035,80 @@ def estimar_tempo_e_impacto_inundacao(
 
     # --- Regressão por horizonte
     chuva_efetiva = _serie_chuva_efetiva(acumulados, cn_base)
-    preditores = _montar_preditores(df, acumulados, chuva_efetiva)
+
+    # Estações de montante: é o preditor que faz a projeção funcionar em
+    # jusante, onde a chuva local não explica nada.
+    try:
+        montante = descobrir_montante(estacao_id, db_path, dias=dias_historico)
+    except Exception:
+        montante = []
+    resposta["montante"] = [
+        {k: v for k, v in m.items() if not k.startswith("_")} for m in montante
+    ]
+
+    preditores_completos = _montar_preditores(df, acumulados, chuva_efetiva, montante)
+
+    # --- SELEÇÃO DO CONJUNTO DE PREDITORES POR VALIDAÇÃO
+    #
+    # Mais condicionantes NÃO significa mais confiável — é o contrário quando
+    # os dados são poucos. Medido neste próprio projeto, prevendo Encantado a
+    # 6 h com validação walk-forward:
+    #
+    #     2 preditores (cota + subida) ......... ganho -2,317
+    #     7 preditores (+ chuva, 5 janelas) .... ganho -0,122   <- melhor
+    #     9 preditores (+ chuva efetiva/CN) .... ganho -0,525
+    #    13 preditores (+ montante) ............ ganho -4,299   <- 35x pior
+    #
+    # Com 30 dias e essencialmente um evento de cheia, cada variável a mais
+    # compra ajuste ao passado e paga com generalização. Por isso o conjunto
+    # não é fixado no chute: testamos os candidatos e ficamos com o que se sai
+    # melhor FORA da amostra, nesta estação e neste momento.
+    #
+    # É também o que permite a propagação de montante entrar onde ela ajuda
+    # (jusante, durante evento) sem estragar onde ela atrapalha.
+    colunas_base = ["cota_atual", "subida_3h"]
+    colunas_chuva = [f"p{h}h" for h in JANELAS_HORAS]
+    colunas_cn = ["pe_mm", "pe_mm2"]
+    colunas_montante = [c for c in preditores_completos.columns if c.startswith("montante")]
+
+    candidatos: dict[str, list[str]] = {
+        "cota + chuva": colunas_base + colunas_chuva,
+        "cota + chuva + CN": colunas_base + colunas_chuva + colunas_cn,
+        "somente cota": colunas_base,
+    }
+    if colunas_montante:
+        candidatos["cota + chuva + CN + montante"] = (
+            colunas_base + colunas_chuva + colunas_cn + colunas_montante
+        )
+        candidatos["cota + montante"] = colunas_base + colunas_montante
+
+    passos_teste = max(
+        1, int(round(tempo.tc_horas * 0.5 * PASSOS_POR_HORA))
+    )
+    melhor_nome, melhor_ganho, melhor_cols = None, -np.inf, None
+    for nome_conj, cols in candidatos.items():
+        cols = [c for c in cols if c in preditores_completos.columns]
+        if not cols:
+            continue
+        modelo_teste = _treinar_horizonte(
+            preditores_completos[cols], df["cota_cm"], passos_teste
+        )
+        if modelo_teste is None:
+            continue
+        if modelo_teste.ganho_validacao > melhor_ganho:
+            melhor_nome, melhor_ganho = nome_conj, modelo_teste.ganho_validacao
+            melhor_cols = cols
+
+    if melhor_cols is None:
+        melhor_cols = [c for c in candidatos["cota + chuva"]
+                       if c in preditores_completos.columns]
+        melhor_nome = "cota + chuva (padrão)"
+
+    resposta["preditores_escolhidos"] = melhor_nome
+    resposta["preditores_n"] = len(melhor_cols)
+    resposta["usou_montante"] = any(c.startswith("montante") for c in melhor_cols)
+
+    preditores = preditores_completos[melhor_cols]
     x_atual = preditores.iloc[-1]
 
     if x_atual.isna().any():
@@ -1034,11 +1244,22 @@ def estimar_tempo_e_impacto_inundacao(
     # valor operacional na primeira metade do Tc e vira ruído depois. Reprovar
     # o modelo inteiro por causa da cauda descartaria a parte que funciona;
     # informar o alcance é mais útil e mais honesto.
-    uteis = [
-        p["horas_a_frente"]
-        for p in resposta["projecao"]
-        if (p.get("ganho_sobre_persistencia") or -1) > 0
-    ]
+    # SEQUÊNCIA a partir do horizonte mais curto, não o maior positivo isolado.
+    #
+    # Antes eu pegava max() dos horizontes com ganho positivo. Isso dava
+    # resultado fisicamente impossível: em Estrela, ganho -11,0 em 4 h, -5,2 em
+    # 8,6 h, -1,4 em 12,9 h e então +0,30 em 21,6 h — e o campo anunciava
+    # "útil até 21,6 h". Se o modelo erra feio no curto prazo, aquele positivo
+    # lá na ponta é ruído, não habilidade: previsão não melhora com o alcance.
+    #
+    # Agora o horizonte útil é o fim da sequência ININTERRUPTA de ganhos
+    # positivos começando pelo mais curto. Primeiro negativo, para.
+    uteis: list[float] = []
+    for ponto in resposta["projecao"]:
+        if (ponto.get("ganho_sobre_persistencia") or -1) > 0:
+            uteis.append(ponto["horas_a_frente"])
+        else:
+            break
     resposta["horizonte_util_horas"] = max(uteis) if uteis else None
 
     resposta["confiavel"] = bool(tempo.confiavel and uteis)
