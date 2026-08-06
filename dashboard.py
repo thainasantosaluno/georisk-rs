@@ -115,8 +115,17 @@ with st.sidebar:
     else:
         st.warning("Banco vazio. Rode uma coleta.")
 
-    incluir_ana = st.checkbox("Incluir telemetria da ANA (+500 estações)", value=False)
-    auto = st.checkbox("Atualização automática", value=False)
+    # LIGADOS POR PADRÃO: o painel se mantém atualizado sozinho, sem exigir
+    # que ninguém lembre de marcar nada.
+    #
+    # A ANA vem marcada porque deixá-la de fora é o que produzia o descompasso
+    # que o aviso de defasagem denuncia: SACE de hoje e 500 estações de
+    # anteontem, no mesmo mapa, com cara de dado atual.
+    #
+    # 15 min é o piso útil: o SACE republica nesse ritmo, então buscar mais
+    # rápido não traz nada novo e só bate no servidor deles à toa.
+    incluir_ana = st.checkbox("Incluir telemetria da ANA (+500 estações)", value=True)
+    auto = st.checkbox("Atualização automática", value=True)
     intervalo_min = st.number_input("A cada (min):", 5, 180, 15, step=5)
 
     if st.button("⬇️ Atualizar agora", use_container_width=True, type="primary"):
@@ -141,8 +150,6 @@ def vigia() -> None:
         st.cache_data.clear()
         st.rerun(scope="app")
 
-
-vigia()
 
 df_estacoes = carregar_dados_integrados()
 
@@ -1033,3 +1040,14 @@ with tab_hidro:
                 "de um modelo que se ajusta ao passado recente. O número que vale "
                 "para decidir é o ganho sobre a persistência."
             )
+
+
+# -----------------------------------------------------------------------------
+# 8. VIGIA DA ATUALIZAÇÃO AUTOMÁTICA
+# -----------------------------------------------------------------------------
+# Fica NO FIM de propósito. O Streamlit executa o script de cima para baixo, e
+# a coleta leva ~2 min: chamando isto no topo, abrir o painel com dado velho
+# deixaria a tela em branco até terminar. Aqui, a página aparece na hora com o
+# que já existe, e a atualização acontece depois — o `st.rerun` redesenha tudo
+# com o dado novo quando termina.
+vigia()

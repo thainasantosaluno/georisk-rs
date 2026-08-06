@@ -108,12 +108,15 @@ with st.sidebar:
     else:
         st.warning("Nenhuma coleta ainda. Clique em **Atualizar agora**.")
 
-    auto = st.checkbox("Atualização automática", value=False)
+    # Ligado por padrão: o painel se mantém atualizado sozinho.
+    auto = st.checkbox("Atualização automática", value=True)
     intervalo_min = st.number_input(
         "Reatualizar a cada (min):", min_value=5, max_value=180, value=15, step=5
     )
+    # Marcada por padrão: deixá-la de fora produzia o descompasso que o aviso
+    # de defasagem denuncia — SACE de hoje e 500 estações de anteontem juntas.
     incluir_ana = st.checkbox(
-        "Incluir telemetria da ANA (mais lento, +500 estações)", value=False
+        "Incluir telemetria da ANA (mais lento, +500 estações)", value=True
     )
 
     if st.button("⬇️ Atualizar agora", use_container_width=True, type="primary"):
@@ -156,7 +159,7 @@ with col_t1:
         "`georisk_rs.db` e padronizados em um formato único."
     )
 with col_t2:
-    vigia_atualizacao()
+    st.empty()  # o vigia roda no fim do arquivo; ver comentário lá
 
 df = obter_estacoes()
 
@@ -793,3 +796,12 @@ with tab2:
             f"{len(alvos)} estação(ões) no recorte · "
             f"{len(resumo_oficial['sem_mancha'])} sem mancha oficial."
         )
+
+
+# -----------------------------------------------------------------------------
+# VIGIA DA ATUALIZAÇÃO AUTOMÁTICA
+# -----------------------------------------------------------------------------
+# No fim de propósito: o Streamlit executa de cima para baixo e a coleta leva
+# ~2 min. Chamando no cabeçalho, abrir com dado velho deixaria a tela em branco
+# até terminar. Aqui a página aparece na hora e a atualização vem depois.
+vigia_atualizacao()
