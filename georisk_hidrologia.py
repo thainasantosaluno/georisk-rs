@@ -1243,6 +1243,11 @@ def projetar_com_agrupado(
 # -----------------------------------------------------------------------------
 # 6. GRÁFICO
 # -----------------------------------------------------------------------------
+def _saturacao_de(api: pd.Series) -> pd.Series:
+    """Converte o índice de encharcamento em grau de saturação 0..1."""
+    return ((api - P72_AMC_SECA) / (P72_AMC_UMIDA - P72_AMC_SECA)).clip(0.0, 1.0)
+
+
 def grafico_hietograma_hidrograma(
     df: pd.DataFrame,
     cadastro: dict,
@@ -1506,21 +1511,18 @@ def estimar_tempo_e_impacto_inundacao(
     resposta["vulnerabilidade"] = avaliar_vulnerabilidade(
         float(api.iloc[-1]), cn_base, area_km2
     )
-    v = resposta["vulnerabilidade"]
-    if v["nivel"] in ("CRÍTICO", "ALTO"):
-        prazo = (
-            f" Continuará assim por ~{v['horas_ate_dessaturar']:.0f} h se não chover mais."
-            if v["horas_ate_dessaturar"] else ""
-        )
-        pior = v["simulacoes"][-1]
-        resposta["avisos"].append(
-            f"SOLO {v['nivel']} — saturação {v['saturacao_pct']:.0f}%. {v['leitura']}"
-            + prazo
-            + f" Simulação: {pior['chuva_simulada_mm']:.0f} mm agora escoariam "
-              f"{pior['escoaria_mm']:.1f} mm"
-            + (f" ({pior['vezes_mais_que_solo_seco']:.0f}x mais que em solo seco)."
-               if pior["vezes_mais_que_solo_seco"] else ".")
-        )
+    # O encharcamento NÃO é exibido em lugar nenhum — nem como aviso, nem como
+    # marcação no gráfico. Ele age onde importa, silenciosamente:
+    #
+    #   - modula o CN de forma contínua (`_ajustar_cn_por_umidade`), o que muda
+    #     retenção, abstração inicial e portanto a chuva efetiva;
+    #   - entra como preditor candidato, e a seleção por validação decide se
+    #     fica;
+    #   - define o volume escoado do balanço.
+    #
+    # Ou seja: as estimativas já saem considerando o solo. O resultado do
+    # cálculo continua disponível em `resposta["vulnerabilidade"]` para quem
+    # quiser consultar por código, mas nada disso vai para a tela.
 
     resposta["cn_base"] = round(float(cn_base), 1)
     resposta["cn_origem"] = cn_origem

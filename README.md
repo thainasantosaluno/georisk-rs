@@ -268,17 +268,28 @@ A chuva do dia 20 quase não moveu o rio — foi gasta encharcando o solo. Do di
 21 para o 22 choveu praticamente o mesmo (69,6 → 70,4 mm) e a cota **mais que
 dobrou**, porque já não havia absorção.
 
-Por isso `avaliar_vulnerabilidade()` avisa **antes da chuva cair**: informa o
-grau de saturação, em quantas horas o solo dessatura se não chover mais, e
-simula quanto escoaria se chovesse agora. Rodando em 21/07, antes da segunda
-chuva, o alerta já diria:
+### O encharcamento não aparece — ele age
 
-> SOLO CRÍTICO — saturação 100 %. Chuva nova escoa quase inteira.
-> Simulação: 50 mm agora escoariam 21,4 mm (134× mais que em solo seco),
-> ou 564 milhões de m³.
+Decisão de projeto: o estado do solo **não é exibido** em lugar nenhum. Sem
+aviso escrito, sem marcação no gráfico, sem indicador. Ele atua onde muda o
+resultado:
 
-Saturação é sinal de alerta por si só, mesmo sem estar chovendo: diz que a
-bacia está armada.
+- modula o CN de forma contínua, alterando retenção, abstração inicial e
+  portanto a chuva efetiva;
+- entra como preditor candidato, e a seleção por validação decide se fica;
+- define o volume escoado do balanço.
+
+As estimativas já saem considerando o solo. Com 50 mm de chuva no Taquari-Antas:
+
+| Estado do solo | API | CN | Escoa | Volume |
+|---|---|---|---|---|
+| Seco | 0 | 53,6 | 0,2 mm | 4 milhões m³ |
+| Meio do caminho | 44 | 69,9 | 5,8 mm | 152 milhões m³ |
+| Encharcado | ≥ 53 | 86,3 | 21,4 mm | **564 milhões m³** |
+
+A mesma chuva, cem vezes mais escoamento. `avaliar_vulnerabilidade()` continua
+disponível para consulta por código — `resposta["vulnerabilidade"]` traz grau de
+saturação, horas até dessaturar e simulações — mas nada disso vai para a tela.
 
 ### Volume, não só lâmina
 

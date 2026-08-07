@@ -907,8 +907,9 @@ with tab_hidro:
             st.caption(f"• {aviso}")
 
         # --- Gráfico hietograma x hidrograma (remontado fora do cache)
+        _serie_est = gh.carregar_series_alinhadas(estacao_id)
         figura = gh.grafico_hietograma_hidrograma(
-            gh.carregar_series_alinhadas(estacao_id),
+            _serie_est,
             gh.carregar_cadastro(estacao_id),
             _projecao_series(resultado),
             resultado["tc_horas"],
