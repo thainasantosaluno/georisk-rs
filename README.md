@@ -252,6 +252,34 @@ O efeito é grande. Encantado, mesma bacia e mesmo CN base de 73,3:
 Com o solo saturado, metade da chuva vira vazão. Com o solo seco, tudo
 infiltra. É a saturação prévia — não o total de chuva — que decide.
 
+### A bacia armada — por que a segunda chuva alaga
+
+Uma vez saturado, o solo leva dias para voltar a absorver. Nesse intervalo,
+qualquer chuva nova escoa quase inteira. Encantado em julho de 2026 é caso de
+manual:
+
+| Dia | Chuva 24 h | Saturação | Cota |
+|---|---|---|---|
+| 20/07 | 35,8 mm | 2 % | **138 cm** |
+| 21/07 | 69,6 mm | **100 %** | **771 cm** |
+| 22/07 | 70,4 mm | **100 %** | **1.708 cm** |
+
+A chuva do dia 20 quase não moveu o rio — foi gasta encharcando o solo. Do dia
+21 para o 22 choveu praticamente o mesmo (69,6 → 70,4 mm) e a cota **mais que
+dobrou**, porque já não havia absorção.
+
+Por isso `avaliar_vulnerabilidade()` avisa **antes da chuva cair**: informa o
+grau de saturação, em quantas horas o solo dessatura se não chover mais, e
+simula quanto escoaria se chovesse agora. Rodando em 21/07, antes da segunda
+chuva, o alerta já diria:
+
+> SOLO CRÍTICO — saturação 100 %. Chuva nova escoa quase inteira.
+> Simulação: 50 mm agora escoariam 21,4 mm (134× mais que em solo seco),
+> ou 564 milhões de m³.
+
+Saturação é sinal de alerta por si só, mesmo sem estar chovendo: diz que a
+bacia está armada.
+
 ### Volume, não só lâmina
 
 Milímetro não diz quanta água é. `mm × km² × 1.000` dá metros cúbicos, grandeza

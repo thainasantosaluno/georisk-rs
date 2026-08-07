@@ -537,6 +537,127 @@ def calcular_chuva_efetiva(
     )
 
 
+# -----------------------------------------------------------------------------
+# JANELA DE VULNERABILIDADE — o solo saturado demora a secar
+# -----------------------------------------------------------------------------
+# O ponto operacional mais importante do módulo, e o que justifica avisar ANTES
+# da chuva cair.
+#
+# Uma vez saturado, o solo leva dias para voltar a absorver. Nesse intervalo,
+# qualquer chuva nova escoa quase inteira — não há mais para onde a água ir.
+# Foi exatamente o que ocorreu em Encantado em julho de 2026:
+#
+#     20/07   35,8 mm de chuva   saturação   2 %   cota    138 cm
+#     21/07   69,6 mm de chuva   saturação 100 %   cota    771 cm
+#     22/07   70,4 mm de chuva   saturação 100 %   cota  1.708 cm
+#
+# A chuva do dia 20 quase não moveu o rio: foi gasta encharcando o solo. Do dia
+# 21 para o 22 choveu praticamente o mesmo (69,6 -> 70,4 mm), mas a cota MAIS
+# QUE DOBROU, porque o solo já não absorvia nada.
+#
+# A diferença medida, para a mesma chuva:
+#
+#     20 mm  ->  escoa  0,0 mm (solo seco)  vs   2,7 mm (saturado)
+#     40 mm  ->  escoa  0,0 mm (solo seco)  vs  14,2 mm (saturado)
+#     60 mm  ->  escoa  1,1 mm (solo seco)  vs  29,3 mm (saturado)
+#
+# Por isso a saturação é sinal de alerta por si só, mesmo sem estar chovendo:
+# ela diz que a bacia está armada.
+
+
+def horas_ate_dessaturar(
+    api_mm: float, meia_vida_dias: float = MEIA_VIDA_ENCHARCAMENTO_DIAS
+) -> float | None:
+    """Quanto tempo até o solo deixar de estar saturado, SE não chover mais.
+
+    Invertendo o decaimento do índice de encharcamento:
+
+        t = meia_vida · log2(API_atual / limiar_de_saturação)
+
+    Devolve None quando o solo já não está saturado.
+    """
+    if api_mm is None or api_mm <= P72_AMC_UMIDA:
+        return None
+    return round(
+        meia_vida_dias * 24.0 * math.log2(api_mm / P72_AMC_UMIDA), 1
+    )
+
+
+def simular_chuva(
+    chuva_mm: float,
+    api_atual_mm: float,
+    cn_base: float = CN_PADRAO,
+    area_bacia_km2: float | None = None,
+) -> dict:
+    """E se chovesse X mm agora, com o solo no estado em que está?
+
+    Responde a pergunta que interessa antes do evento: a mesma chuva que hoje
+    seria absorvida, amanhã — com o solo já encharcado — vira enxurrada. A
+    comparação com o solo seco mostra o tamanho da diferença.
+    """
+    agora = calcular_chuva_efetiva(
+        chuva_mm, p72_mm=api_atual_mm, cn_base=cn_base,
+        api_mm=api_atual_mm, area_bacia_km2=area_bacia_km2,
+    )
+    seco = calcular_chuva_efetiva(
+        chuva_mm, p72_mm=0.0, cn_base=cn_base,
+        api_mm=0.0, area_bacia_km2=area_bacia_km2,
+    )
+    return {
+        "chuva_simulada_mm": round(float(chuva_mm), 1),
+        "escoaria_mm": agora.precipitacao_efetiva_mm,
+        "escoaria_se_solo_seco_mm": seco.precipitacao_efetiva_mm,
+        "volume_escoado_m3": agora.volume_escoado_m3,
+        "coeficiente_escoamento": agora.coeficiente_escoamento,
+        "vezes_mais_que_solo_seco": (
+            round(agora.precipitacao_efetiva_mm / seco.precipitacao_efetiva_mm, 1)
+            if seco.precipitacao_efetiva_mm > 0.05 else None
+        ),
+    }
+
+
+def avaliar_vulnerabilidade(
+    api_mm: float,
+    cn_base: float = CN_PADRAO,
+    area_bacia_km2: float | None = None,
+    chuvas_teste: tuple[float, ...] = (10.0, 25.0, 50.0),
+) -> dict:
+    """Estado de armadilha da bacia: quão perigosa seria a PRÓXIMA chuva.
+
+    Não depende de estar chovendo. É a leitura de que a bacia está armada — e
+    de por quanto tempo ainda vai estar.
+    """
+    saturacao = float(np.clip(
+        (api_mm - P72_AMC_SECA) / (P72_AMC_UMIDA - P72_AMC_SECA), 0.0, 1.0
+    ))
+    horas = horas_ate_dessaturar(api_mm)
+
+    if saturacao >= 0.99:
+        nivel, texto = "CRÍTICO", (
+            "Solo saturado: chuva nova escoa quase inteira, sem absorção."
+        )
+    elif saturacao >= 0.6:
+        nivel, texto = "ALTO", (
+            "Solo próximo da saturação: pouca capacidade de absorção restante."
+        )
+    elif saturacao >= 0.25:
+        nivel, texto = "MODERADO", "Solo parcialmente úmido."
+    else:
+        nivel, texto = "BAIXO", "Solo com boa capacidade de absorção."
+
+    return {
+        "encharcamento_mm": round(float(api_mm), 2),
+        "saturacao_pct": round(saturacao * 100, 1),
+        "nivel": nivel,
+        "leitura": texto,
+        "horas_ate_dessaturar": horas,
+        "simulacoes": [
+            simular_chuva(mm, api_mm, cn_base, area_bacia_km2)
+            for mm in chuvas_teste
+        ],
+    }
+
+
 def _serie_chuva_efetiva(
     acumulados: pd.DataFrame, cn_base: float, api: pd.Series | None = None
 ) -> pd.Series:
@@ -1314,6 +1435,7 @@ def estimar_tempo_e_impacto_inundacao(
         "precipitacao_acumulada_mm": {},
         "volume_efetivo_mm": None,
         "encharcamento_mm": None,
+        "vulnerabilidade": None,
         "balanco_hidrico": None,
         "cn_base": None,
         "cn_origem": None,
@@ -1381,6 +1503,25 @@ def estimar_tempo_e_impacto_inundacao(
         api_mm=float(api.iloc[-1]),
         area_bacia_km2=area_km2,
     )
+    resposta["vulnerabilidade"] = avaliar_vulnerabilidade(
+        float(api.iloc[-1]), cn_base, area_km2
+    )
+    v = resposta["vulnerabilidade"]
+    if v["nivel"] in ("CRÍTICO", "ALTO"):
+        prazo = (
+            f" Continuará assim por ~{v['horas_ate_dessaturar']:.0f} h se não chover mais."
+            if v["horas_ate_dessaturar"] else ""
+        )
+        pior = v["simulacoes"][-1]
+        resposta["avisos"].append(
+            f"SOLO {v['nivel']} — saturação {v['saturacao_pct']:.0f}%. {v['leitura']}"
+            + prazo
+            + f" Simulação: {pior['chuva_simulada_mm']:.0f} mm agora escoariam "
+              f"{pior['escoaria_mm']:.1f} mm"
+            + (f" ({pior['vezes_mais_que_solo_seco']:.0f}x mais que em solo seco)."
+               if pior["vezes_mais_que_solo_seco"] else ".")
+        )
+
     resposta["cn_base"] = round(float(cn_base), 1)
     resposta["cn_origem"] = cn_origem
     resposta["volume_efetivo_mm"] = balanco.precipitacao_efetiva_mm
