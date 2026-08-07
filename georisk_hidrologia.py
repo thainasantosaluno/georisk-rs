@@ -110,6 +110,12 @@ JANELA_PULSO_HORAS = 3
 # Abaixo disto a correlação chuva-local x nível não sustenta projeção.
 CORRELACAO_MINIMA = 0.30
 
+# Meia-vida do índice de encharcamento: em quantos dias a chuva de hoje perde
+# metade do peso sobre a umidade do solo. 3 dias é o valor usual em bacias
+# subtropicais úmidas; solo arenoso drena mais rápido (1-2 d), argiloso mais
+# devagar (5-7 d).
+MEIA_VIDA_ENCHARCAMENTO_DIAS = 3.0
+
 # SCS-CN. CN2 = condição de umidade média (AMC II).
 CN_PADRAO = 75.0
 P72_AMC_SECA = 35.0                # mm — abaixo disso, solo seco (AMC I)
@@ -150,6 +156,14 @@ class ChuvaEfetiva:
     cn_ajustado: float
     condicao_umidade: str
     p72_mm: float
+    # --- Encharcamento e volume
+    api_mm: float | None = None              # índice de encharcamento do solo
+    saturacao_pct: float | None = None       # 0 % seco, 100 % encharcado
+    area_bacia_km2: float | None = None
+    volume_precipitado_m3: float | None = None   # o que caiu sobre a bacia
+    volume_escoado_m3: float | None = None       # o que vira vazão
+    volume_infiltrado_m3: float | None = None    # o que o solo absorveu
+    coeficiente_escoamento: float | None = None  # escoado / precipitado
 
 
 # -----------------------------------------------------------------------------
@@ -388,24 +402,78 @@ def estimar_tempo_resposta(
 # -----------------------------------------------------------------------------
 # 4. BALANÇO VOLUMÉTRICO — SCS-CN COM UMIDADE ANTECEDENTE
 # -----------------------------------------------------------------------------
-def _ajustar_cn_por_umidade(cn2: float, p72_mm: float) -> tuple[float, str]:
+def indice_encharcamento(
+    chuva_mm: pd.Series, meia_vida_dias: float = MEIA_VIDA_ENCHARCAMENTO_DIAS
+) -> pd.Series:
+    """Índice de encharcamento do solo (API — Antecedent Precipitation Index).
+
+        API_t = k · API_{t-1} + P_t
+
+    A chuva de hoje soma; a de ontem ainda pesa, mas menos; a da semana passada
+    quase não pesa. `k` sai da meia-vida: k = 0.5^(passo/meia_vida).
+
+    POR QUE ISTO SUBSTITUI O DEGRAU DE 72 h
+    ---------------------------------------
+    Antes o encharcamento era um interruptor de três posições, decidido pela
+    chuva de 72 h: abaixo de 35 mm solo seco, acima de 53 mm solo saturado, no
+    meio umidade média. Dois problemas nisso.
+
+    Primeiro, é descontínuo: 52 mm e 54 mm em 72 h davam CN muito diferentes,
+    embora o solo esteja praticamente no mesmo estado. Segundo, ignora QUANDO a
+    chuva caiu — 60 mm concentrados ontem encharcam muito mais que 60 mm
+    espalhados em três dias, e a soma de 72 h não distingue os dois casos.
+
+    O API resolve os dois: é contínuo e pondera pelo tempo decorrido.
+    """
+    k = 0.5 ** ((PASSO_MINUTOS / 60.0 / 24.0) / meia_vida_dias)
+    valores = np.zeros(len(chuva_mm))
+    acumulado = 0.0
+    for i, p in enumerate(chuva_mm.fillna(0.0).to_numpy()):
+        acumulado = acumulado * k + float(p)
+        valores[i] = acumulado
+    return pd.Series(valores, index=chuva_mm.index, name="api_mm")
+
+
+def _ajustar_cn_por_umidade(
+    cn2: float, p72_mm: float, api_mm: float | None = None
+) -> tuple[float, str]:
     """Converte CN de umidade média (AMC II) para a condição real do solo.
 
-    A saturação prévia é inferida da chuva acumulada em 72 h, como pedido.
-    Solo já encharcado infiltra menos e escoa mais — é o que transforma uma
-    chuva "normal" em cheia.
+    Quando o índice de encharcamento (`api_mm`) está disponível, a transição é
+    CONTÍNUA entre AMC I e AMC III, interpolando pelo grau de saturação. Sem
+    ele, cai no degrau clássico das 72 h — que continua aqui como retaguarda,
+    para o método permanecer aplicável a quem só tem o acumulado.
     """
+    cn_seco = 4.2 * cn2 / (10.0 - 0.058 * cn2)
+    cn_saturado = 23.0 * cn2 / (10.0 + 0.13 * cn2)
+
+    if api_mm is not None:
+        # Grau de saturação: 0 = solo seco, 1 = encharcado. Os limiares são os
+        # mesmos do AMC clássico, mas agora como extremos de uma rampa.
+        grau = (api_mm - P72_AMC_SECA) / (P72_AMC_UMIDA - P72_AMC_SECA)
+        grau = float(np.clip(grau, 0.0, 1.0))
+        cn = cn_seco + grau * (cn_saturado - cn_seco)
+        if grau <= 0.05:
+            rotulo = f"solo seco (saturação {grau:.0%})"
+        elif grau >= 0.95:
+            rotulo = f"solo encharcado (saturação {grau:.0%})"
+        else:
+            rotulo = f"umidade intermediária (saturação {grau:.0%})"
+        return cn, rotulo
+
     if p72_mm < P72_AMC_SECA:
-        cn = 4.2 * cn2 / (10.0 - 0.058 * cn2)          # AMC I — solo seco
-        return cn, "AMC I (solo seco)"
+        return cn_seco, "AMC I (solo seco)"
     if p72_mm > P72_AMC_UMIDA:
-        cn = 23.0 * cn2 / (10.0 + 0.13 * cn2)          # AMC III — solo saturado
-        return cn, "AMC III (solo saturado)"
+        return cn_saturado, "AMC III (solo saturado)"
     return cn2, "AMC II (umidade média)"
 
 
 def calcular_chuva_efetiva(
-    precipitacao_mm: float, p72_mm: float, cn_base: float = CN_PADRAO
+    precipitacao_mm: float,
+    p72_mm: float,
+    cn_base: float = CN_PADRAO,
+    api_mm: float | None = None,
+    area_bacia_km2: float | None = None,
 ) -> ChuvaEfetiva:
     """Precipitação efetiva (escoamento superficial) pelo método SCS-CN.
 
@@ -417,7 +485,7 @@ def calcular_chuva_efetiva(
     hidrológico B/C. Se você tiver uso e tipo de solo da bacia, passe o CN
     tabelado correspondente.
     """
-    cn_ajustado, condicao = _ajustar_cn_por_umidade(cn_base, p72_mm)
+    cn_ajustado, condicao = _ajustar_cn_por_umidade(cn_base, p72_mm, api_mm)
     cn_ajustado = min(max(cn_ajustado, 1.0), 100.0)
 
     retencao = 25400.0 / cn_ajustado - 254.0
@@ -429,7 +497,35 @@ def calcular_chuva_efetiva(
     else:
         efetiva = 0.0
 
+    # --- VOLUME, não só lâmina.
+    # Lâmina em mm não diz quanta água é. 1 mm sobre 1 km² = 1.000 m³, então
+    # `mm × km² × 1.000` dá metros cúbicos — grandeza comparável com a vazão do
+    # rio e com o que a calha comporta. Os mesmos 40 mm significam coisas muito
+    # diferentes no Caí (4.956 km²) e no Uruguai (215.612 km²).
+    volume_precipitado = volume_escoado = volume_infiltrado = None
+    coeficiente = None
+    if area_bacia_km2 and area_bacia_km2 > 0:
+        volume_precipitado = precipitacao_mm * area_bacia_km2 * 1000.0
+        volume_escoado = efetiva * area_bacia_km2 * 1000.0
+        volume_infiltrado = max(0.0, volume_precipitado - volume_escoado)
+        coeficiente = (
+            round(efetiva / precipitacao_mm, 3) if precipitacao_mm > 0 else 0.0
+        )
+
+    grau = None
+    if api_mm is not None:
+        grau = float(np.clip(
+            (api_mm - P72_AMC_SECA) / (P72_AMC_UMIDA - P72_AMC_SECA), 0.0, 1.0
+        )) * 100.0
+
     return ChuvaEfetiva(
+        api_mm=None if api_mm is None else round(float(api_mm), 2),
+        saturacao_pct=None if grau is None else round(grau, 1),
+        area_bacia_km2=area_bacia_km2,
+        volume_precipitado_m3=None if volume_precipitado is None else round(volume_precipitado),
+        volume_escoado_m3=None if volume_escoado is None else round(volume_escoado),
+        volume_infiltrado_m3=None if volume_infiltrado is None else round(volume_infiltrado),
+        coeficiente_escoamento=coeficiente,
         precipitacao_total_mm=round(float(precipitacao_mm), 2),
         precipitacao_efetiva_mm=round(float(efetiva), 2),
         abstracao_inicial_mm=round(float(abstracao), 2),
@@ -441,7 +537,9 @@ def calcular_chuva_efetiva(
     )
 
 
-def _serie_chuva_efetiva(acumulados: pd.DataFrame, cn_base: float) -> pd.Series:
+def _serie_chuva_efetiva(
+    acumulados: pd.DataFrame, cn_base: float, api: pd.Series | None = None
+) -> pd.Series:
     """Chuva efetiva ao longo de toda a série, para virar preditor da regressão.
 
     Vetorizado: usa P24h como evento e P72h como saturação prévia.
@@ -449,15 +547,22 @@ def _serie_chuva_efetiva(acumulados: pd.DataFrame, cn_base: float) -> pd.Series:
     p24 = acumulados["p24h"].to_numpy(dtype=float)
     p72 = acumulados["p72h"].to_numpy(dtype=float)
 
-    cn = np.where(
-        p72 < P72_AMC_SECA,
-        4.2 * cn_base / (10.0 - 0.058 * cn_base),
-        np.where(
-            p72 > P72_AMC_UMIDA,
-            23.0 * cn_base / (10.0 + 0.13 * cn_base),
-            cn_base,
-        ),
-    )
+    cn_seco = 4.2 * cn_base / (10.0 - 0.058 * cn_base)
+    cn_saturado = 23.0 * cn_base / (10.0 + 0.13 * cn_base)
+
+    if api is not None:
+        # Rampa contínua entre solo seco e encharcado, em vez do degrau de 72 h.
+        grau = np.clip(
+            (api.to_numpy(dtype=float) - P72_AMC_SECA)
+            / (P72_AMC_UMIDA - P72_AMC_SECA),
+            0.0, 1.0,
+        )
+        cn = cn_seco + grau * (cn_saturado - cn_seco)
+    else:
+        cn = np.where(
+            p72 < P72_AMC_SECA, cn_seco,
+            np.where(p72 > P72_AMC_UMIDA, cn_saturado, cn_base),
+        )
     cn = np.clip(cn, 1.0, 100.0)
 
     retencao = 25400.0 / cn - 254.0
@@ -601,6 +706,7 @@ def _montar_preditores(
     acumulados: pd.DataFrame,
     chuva_efetiva: pd.Series,
     montante: list[dict] | None = None,
+    api: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Matriz de preditores, alinhada no tempo.
 
@@ -623,6 +729,14 @@ def _montar_preditores(
         preditores[f"p{horas}h"] = acumulados[f"p{horas}h"]
     preditores["pe_mm"] = chuva_efetiva
     preditores["pe_mm2"] = chuva_efetiva ** 2
+    if api is not None:
+        # Estado de encharcamento do solo. É o que faz a MESMA chuva gerar
+        # cheia ou não: em Encantado, 68,8 mm com solo saturado deram 53 % de
+        # escoamento; 1,4 mm com solo seco deram 0 %.
+        preditores["encharcamento"] = api
+        preditores["saturacao"] = np.clip(
+            (api - P72_AMC_SECA) / (P72_AMC_UMIDA - P72_AMC_SECA), 0.0, 1.0
+        )
 
     for i, mont in enumerate(montante or [], start=1):
         serie = mont.get("_serie")
@@ -761,6 +875,248 @@ def _treinar_horizonte(
         delta_maximo=float(np.percentile(y, 99.5)),
         n_amostras=len(base),
     )
+
+
+# -----------------------------------------------------------------------------
+# MODELO AGRUPADO — treinado com todas as estações ao mesmo tempo
+# -----------------------------------------------------------------------------
+# O salto de qualidade do módulo. Medido com validação "deixa uma estação de
+# fora" (treina em 31 estações, prevê a 32ª, que o modelo nunca viu):
+#
+#     modelo por estação, 30 dias ......... ganho NEGATIVO (perde da persistência)
+#     modelo agrupado, 107 mil amostras ... ganho +0,46
+#
+# A razão é simples: uma estação sozinha oferece ~2.900 instantes e
+# essencialmente UM evento de cheia. Agrupando 32 estações, o mesmo evento é
+# observado 32 vezes, em bacias de tamanhos e respostas diferentes — e aí há
+# material para o ajuste generalizar em vez de decorar.
+#
+# SOBRE AS CONDICIONANTES DE SOLO, USO E GEOLOGIA
+# ------------------------------------------------
+# É neste modelo que elas PODEM pesar: por estação o CN é constante e uma
+# coluna constante não informa nada numa regressão (variância zero, absorvida
+# pelo intercepto). Agrupando, o CN varia entre estações e passa a poder
+# explicar por que uma bacia responde diferente da outra.
+#
+# Medido, porém, o ganho delas é marginal:
+#
+#     só hidrologia ......................... 0,4601
+#     + CN (solo + uso + litologia) ......... 0,4612
+#     + densidade de drenagem ............... 0,4612
+#     + densidade de lineamentos ............ 0,4615
+#     + área da bacia ....................... 0,4615
+#
+# Total: +0,0014, ou 0,3%. Ficam no modelo porque não atrapalham e porque a
+# tendência é ganharem peso conforme o arquivo mensal acumular mais eventos —
+# mas registrar o tamanho real da contribuição evita atribuir a elas um mérito
+# que hoje é do volume de dado.
+#
+# NORMALIZAÇÃO
+# ------------
+# Cada estação tem escala própria (Estrela opera na casa dos 2.000 cm, Linha
+# Colombo dos 300 cm). Sem normalizar, o ajuste seria dominado pelos rios
+# grandes. O alvo é a variação da cota RELATIVA à cota de inundação daquela
+# estação, o que também torna o erro comparável entre bacias.
+
+# Escala de densidade de drenagem do IBGE para número ordenável.
+_DRENAGEM_ORDINAL = {
+    "muito alta": 5, "alta": 4, "média": 3, "baixa": 2, "muito baixa": 1,
+}
+
+# Mínimo de amostras por estação para ela entrar no agrupamento.
+MINIMO_AMOSTRAS_AGRUPADO = 100
+
+
+@dataclass
+class ModeloAgrupado:
+    """Ajuste treinado sobre várias estações de uma vez."""
+    beta: np.ndarray
+    media: np.ndarray
+    desvio: np.ndarray
+    colunas: list[str]
+    ganho_estacao_nova: float     # validação deixa-uma-estação-de-fora
+    n_amostras: int
+    n_estacoes: int
+    horizonte_horas: float
+
+    def prever_delta_relativo(self, x: np.ndarray) -> float:
+        x_pad = np.concatenate([[1.0], (x - self.media) / self.desvio])
+        return float(x_pad @ self.beta)
+
+
+def _amostras_da_estacao(
+    estacao: dict, db_path: str, passos_adiante: int, dias: int
+) -> pd.DataFrame | None:
+    """Monta as linhas de treino de UMA estação, já normalizadas."""
+    inundacao = estacao.get("cota_inundacao_cm")
+    if inundacao is None or pd.isna(inundacao) or float(inundacao) <= 0:
+        return None  # sem cota oficial não há como normalizar
+
+    serie = carregar_series_alinhadas(estacao["id"], db_path, dias=dias)
+    if serie.empty or "cota_cm" not in serie:
+        return None
+    if serie["cota_cm"].isna().sum() > len(serie) * 0.5:
+        return None
+
+    acumulados = acumulados_moveis(serie["chuva_mm"])
+    inundacao = float(inundacao)
+
+    d = pd.DataFrame(index=serie.index)
+    d["h_rel"] = serie["cota_cm"] / inundacao          # 1,0 = cota de inundação
+    d["subida_rel"] = d["h_rel"].diff(3 * PASSOS_POR_HORA)
+    for horas in JANELAS_HORAS:
+        d[f"p{horas}h"] = acumulados[f"p{horas}h"]
+
+    # --- Condicionantes da bacia (constantes aqui, variáveis entre estações)
+    try:
+        import georisk_geo as gg
+        cn = gg.cn_da_bacia(estacao.get("bacia"), db_path)
+        carac = next(
+            (c for c in gg.caracterizacoes(db_path)
+             if gg._normalizar(c["nome"]) == gg._normalizar(estacao.get("bacia"))),
+            None,
+        )
+    except Exception:
+        cn, carac = None, None
+
+    d["cn"] = cn if cn is not None else CN_PADRAO
+    if carac:
+        d["dens_drenagem"] = _DRENAGEM_ORDINAL.get(
+            carac["geomorfologia"]["densidade_dominante"], 3
+        )
+        d["lineamentos"] = carac.get("densidade_lineamentos_km_km2", 0.0)
+        d["log_area"] = np.log10(max(carac.get("area_km2", 1.0), 1.0))
+    else:
+        d["dens_drenagem"], d["lineamentos"], d["log_area"] = 3, 0.0, 3.0
+
+    d["_alvo"] = d["h_rel"].shift(-passos_adiante) - d["h_rel"]
+    d["_estacao"] = estacao["id"]
+    d = d.dropna()
+    return d if len(d) >= MINIMO_AMOSTRAS_AGRUPADO else None
+
+
+_cache_agrupado: dict[float, "ModeloAgrupado | None"] = {}
+
+
+def obter_modelo_agrupado(
+    horizonte_horas: float = 6.0, db_path: str = CAMINHO_BANCO_PADRAO
+) -> "ModeloAgrupado | None":
+    """Modelo agrupado com cache — treinar varre a série de todas as estações."""
+    chave = round(horizonte_horas, 2)
+    if chave not in _cache_agrupado:
+        try:
+            _cache_agrupado[chave] = treinar_modelo_agrupado(horizonte_horas, db_path)
+        except Exception:
+            _cache_agrupado[chave] = None
+    return _cache_agrupado[chave]
+
+
+def treinar_modelo_agrupado(
+    horizonte_horas: float = 6.0,
+    db_path: str = CAMINHO_BANCO_PADRAO,
+    dias: int = 30,
+    progresso=None,
+) -> ModeloAgrupado | None:
+    """Treina um ajuste único sobre todas as estações com cota oficial.
+
+    A validação é DEIXA-UMA-ESTAÇÃO-DE-FORA: treina em N-1 e mede na que ficou
+    fora. É a pergunta certa — "este modelo serve para uma estação que ele nunca
+    viu?" — e é bem mais dura que validar no tempo da mesma estação.
+    """
+    passos = max(1, int(round(horizonte_horas * PASSOS_POR_HORA)))
+
+    with _conectar(db_path) as con:
+        con.row_factory = sqlite3.Row
+        estacoes = [
+            dict(r) for r in con.execute(
+                "SELECT id, nome, bacia, cota_inundacao_cm FROM estacao "
+                "WHERE fonte = 'SACE/SGB' AND cota_inundacao_cm IS NOT NULL"
+            )
+        ]
+
+    blocos = []
+    for i, est in enumerate(estacoes):
+        if progresso:
+            try:
+                progresso(i / max(len(estacoes), 1), f"Lendo {est['nome']}…")
+            except Exception:
+                pass
+        bloco = _amostras_da_estacao(est, db_path, passos, dias)
+        if bloco is not None:
+            blocos.append(bloco)
+
+    if len(blocos) < 5:
+        return None
+
+    dados = pd.concat(blocos)
+    colunas = [c for c in dados.columns if not c.startswith("_")]
+
+    X_todos = dados[colunas].to_numpy(dtype=float)
+    y_todos = dados["_alvo"].to_numpy(dtype=float)
+
+    def ajustar(X: np.ndarray, y: np.ndarray):
+        media = X.mean(axis=0)
+        desvio = X.std(axis=0)
+        desvio[desvio == 0] = 1.0
+        X_pad = np.column_stack([np.ones(len(X)), (X - media) / desvio])
+        beta = _minimos_quadrados_regularizados(X_pad, y)
+        return beta, media, desvio
+
+    # --- Validação: cada estação, uma vez, fora do treino
+    erro_modelo = erro_persistencia = 0.0
+    for alvo_id in dados["_estacao"].unique():
+        treino = dados[dados["_estacao"] != alvo_id]
+        teste = dados[dados["_estacao"] == alvo_id]
+        if len(teste) < MINIMO_AMOSTRAS_AGRUPADO:
+            continue
+        beta, media, desvio = ajustar(
+            treino[colunas].to_numpy(float), treino["_alvo"].to_numpy()
+        )
+        Xv = teste[colunas].to_numpy(float)
+        yv = teste["_alvo"].to_numpy()
+        previsto = np.column_stack([np.ones(len(Xv)), (Xv - media) / desvio]) @ beta
+        erro_modelo += float(((yv - previsto) ** 2).sum())
+        erro_persistencia += float((yv ** 2).sum())
+
+    ganho = (
+        1.0 - erro_modelo / erro_persistencia if erro_persistencia > 0 else 0.0
+    )
+
+    beta, media, desvio = ajustar(X_todos, y_todos)
+    return ModeloAgrupado(
+        beta=beta, media=media, desvio=desvio, colunas=colunas,
+        ganho_estacao_nova=round(ganho, 4),
+        n_amostras=len(dados),
+        n_estacoes=dados["_estacao"].nunique(),
+        horizonte_horas=horizonte_horas,
+    )
+
+
+def projetar_com_agrupado(
+    estacao_id: str,
+    modelo: ModeloAgrupado,
+    db_path: str = CAMINHO_BANCO_PADRAO,
+    dias: int = 30,
+) -> dict | None:
+    """Aplica o modelo agrupado a uma estação, devolvendo a cota em cm."""
+    cadastro = carregar_cadastro(estacao_id, db_path)
+    passos = max(1, int(round(modelo.horizonte_horas * PASSOS_POR_HORA)))
+    bloco = _amostras_da_estacao(cadastro, db_path, passos, dias)
+    if bloco is None or bloco.empty:
+        return None
+
+    inundacao = float(cadastro["cota_inundacao_cm"])
+    x = bloco[modelo.colunas].iloc[-1].to_numpy(dtype=float)
+    delta_rel = modelo.prever_delta_relativo(x)
+
+    cota_agora = float(bloco["h_rel"].iloc[-1]) * inundacao
+    return {
+        "cota_projetada_cm": round(max(0.0, cota_agora + delta_rel * inundacao), 1),
+        "horas_a_frente": modelo.horizonte_horas,
+        "ganho_estacao_nova": modelo.ganho_estacao_nova,
+        "n_amostras_treino": modelo.n_amostras,
+        "n_estacoes_treino": modelo.n_estacoes,
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -954,8 +1310,10 @@ def estimar_tempo_e_impacto_inundacao(
         "preditores_escolhidos": None,
         "preditores_n": None,
         "usou_montante": None,
+        "projecao_agrupada": None,
         "precipitacao_acumulada_mm": {},
         "volume_efetivo_mm": None,
+        "encharcamento_mm": None,
         "balanco_hidrico": None,
         "cn_base": None,
         "cn_origem": None,
@@ -997,11 +1355,31 @@ def estimar_tempo_e_impacto_inundacao(
         f"{h}h": round(float(acumulados[f"p{h}h"].iloc[-1]), 2) for h in JANELAS_HORAS
     }
 
-    # --- Balanço volumétrico (SCS-CN com AMC pelas 72 h)
+    # --- Encharcamento do solo, contínuo, a partir da série inteira de chuva
+    api = indice_encharcamento(df["chuva_mm"])
+    resposta["encharcamento_mm"] = round(float(api.iloc[-1]), 2)
+
+    # --- Área da bacia, para converter lâmina (mm) em volume (m³)
+    area_km2 = None
+    try:
+        import georisk_geo as gg
+        carac = next(
+            (c for c in gg.caracterizacoes(db_path)
+             if gg._normalizar(c["nome"]) == gg._normalizar(cadastro.get("bacia"))),
+            None,
+        )
+        if carac:
+            area_km2 = carac.get("area_km2")
+    except Exception:
+        pass
+
+    # --- Balanço volumétrico (SCS-CN com encharcamento contínuo e volume)
     balanco = calcular_chuva_efetiva(
         precipitacao_mm=float(acumulados["p24h"].iloc[-1]),
         p72_mm=float(acumulados["p72h"].iloc[-1]),
         cn_base=cn_base,
+        api_mm=float(api.iloc[-1]),
+        area_bacia_km2=area_km2,
     )
     resposta["cn_base"] = round(float(cn_base), 1)
     resposta["cn_origem"] = cn_origem
@@ -1034,7 +1412,7 @@ def estimar_tempo_e_impacto_inundacao(
         return resposta
 
     # --- Regressão por horizonte
-    chuva_efetiva = _serie_chuva_efetiva(acumulados, cn_base)
+    chuva_efetiva = _serie_chuva_efetiva(acumulados, cn_base, api)
 
     # Estações de montante: é o preditor que faz a projeção funcionar em
     # jusante, onde a chuva local não explica nada.
@@ -1046,7 +1424,9 @@ def estimar_tempo_e_impacto_inundacao(
         {k: v for k, v in m.items() if not k.startswith("_")} for m in montante
     ]
 
-    preditores_completos = _montar_preditores(df, acumulados, chuva_efetiva, montante)
+    preditores_completos = _montar_preditores(
+        df, acumulados, chuva_efetiva, montante, api
+    )
 
     # --- SELEÇÃO DO CONJUNTO DE PREDITORES POR VALIDAÇÃO
     #
@@ -1069,11 +1449,15 @@ def estimar_tempo_e_impacto_inundacao(
     colunas_base = ["cota_atual", "subida_3h"]
     colunas_chuva = [f"p{h}h" for h in JANELAS_HORAS]
     colunas_cn = ["pe_mm", "pe_mm2"]
+    colunas_solo = [c for c in ("encharcamento", "saturacao")
+                    if c in preditores_completos.columns]
     colunas_montante = [c for c in preditores_completos.columns if c.startswith("montante")]
 
     candidatos: dict[str, list[str]] = {
         "cota + chuva": colunas_base + colunas_chuva,
         "cota + chuva + CN": colunas_base + colunas_chuva + colunas_cn,
+        "cota + chuva + CN + encharcamento":
+            colunas_base + colunas_chuva + colunas_cn + colunas_solo,
         "somente cota": colunas_base,
     }
     if colunas_montante:
@@ -1263,6 +1647,32 @@ def estimar_tempo_e_impacto_inundacao(
     resposta["horizonte_util_horas"] = max(uteis) if uteis else None
 
     resposta["confiavel"] = bool(tempo.confiavel and uteis)
+
+    # --- MODELO AGRUPADO como alternativa quando o por-estação não serve.
+    #
+    # Com 30 dias, uma estação sozinha oferece essencialmente um evento de
+    # cheia e o ajuste perde para a persistência. Agrupando 44 estações, o
+    # mesmo evento é observado dezenas de vezes em bacias diferentes, e a
+    # validação deixa-uma-estação-de-fora dá ganho +0,47 numa estação que o
+    # modelo nunca viu. Então: se o local não bate a persistência, oferecemos
+    # o agrupado, que bate.
+    if not resposta["confiavel"]:
+        agrupado = obter_modelo_agrupado(
+            horizonte_horas=max(1.0, (tempo.tc_horas or 6.0) * 0.5), db_path=db_path
+        )
+        if agrupado is not None and agrupado.ganho_estacao_nova > 0:
+            alternativa = projetar_com_agrupado(estacao_id, agrupado, db_path)
+            if alternativa:
+                resposta["projecao_agrupada"] = alternativa
+                resposta["avisos"].append(
+                    f"O ajuste desta estação sozinha não supera a persistência, mas o "
+                    f"MODELO AGRUPADO supera: treinado com "
+                    f"{agrupado.n_amostras:,} amostras de {agrupado.n_estacoes} estações, "
+                    f"tem ganho {agrupado.ganho_estacao_nova:+.2f} prevendo estação que "
+                    f"nunca viu. Projeção dele: "
+                    f"{alternativa['cota_projetada_cm']:.0f} cm em "
+                    f"+{alternativa['horas_a_frente']:.0f} h."
+                )
     if uteis:
         resposta["avisos"].append(
             f"Projeção com ganho real sobre a persistência até {max(uteis):.1f} h à "

@@ -221,6 +221,54 @@ Em Encantado no pico de 22/07, o escoamento passou de 38,4 para 35,5 mm.
 As duas tabelas de conversão (solo → grupo, uso × grupo → CN) continuam sendo
 **parâmetro documentado, não medição**, e ficam expostas no topo do módulo.
 
+## Encharcamento do solo e volume
+
+Duas coisas que a lâmina de chuva sozinha não conta.
+
+### Encharcamento — o que transforma chuva normal em cheia
+
+O estado de umidade do solo deixou de ser um interruptor de três posições
+(AMC I/II/III pela chuva de 72 h) e virou índice contínuo:
+
+    API_t = k · API_{t-1} + P_t          k = 0,5^(passo/meia-vida)
+
+A chuva de hoje soma, a de ontem ainda pesa menos, a da semana passada quase
+não pesa. Meia-vida padrão de 3 dias.
+
+O degrau de 72 h tinha dois defeitos. Era descontínuo — 52 mm e 54 mm davam CN
+muito diferentes com o solo praticamente no mesmo estado. E ignorava *quando* a
+chuva caiu: 60 mm concentrados ontem encharcam muito mais que 60 mm espalhados
+em três dias, e a soma de 72 h não distingue.
+
+O efeito é grande. Encantado, mesma bacia e mesmo CN base de 73,3:
+
+| | Cheia de 22/07 | Período seco |
+|---|---|---|
+| Encharcamento (API) | 88,1 mm — saturação **100 %** | 18,5 mm — saturação **0 %** |
+| CN ajustado | **86,3** | **53,6** |
+| Chuva 24 h | 68,8 mm | 1,4 mm |
+| **Coeficiente de escoamento** | **0,531** | **0,000** |
+
+Com o solo saturado, metade da chuva vira vazão. Com o solo seco, tudo
+infiltra. É a saturação prévia — não o total de chuva — que decide.
+
+### Volume, não só lâmina
+
+Milímetro não diz quanta água é. `mm × km² × 1.000` dá metros cúbicos, grandeza
+comparável com a vazão do rio e com o que a calha comporta. Os mesmos 40 mm
+significam coisas diferentes no Caí (4.956 km²) e no Uruguai (215.612 km²).
+
+No pico de 22/07, sobre os 26.315 km² do Taquari-Antas:
+
+| | Volume |
+|---|---|
+| Precipitado | 1.810 milhões de m³ |
+| **Escoado** (virou vazão) | **962 milhões de m³** |
+| Infiltrado | 849 milhões de m³ |
+
+O balanço traz `volume_precipitado_m3`, `volume_escoado_m3`,
+`volume_infiltrado_m3` e `coeficiente_escoamento`.
+
 ## Geologia, estrutura e relevo
 
 Três camadas do BDIA/IBGE caracterizam cada bacia, com papéis deliberadamente
