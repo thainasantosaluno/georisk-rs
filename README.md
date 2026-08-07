@@ -206,6 +206,25 @@ derivar até onde a água chega; a faixa é proporcional à altura da cota e ser
 para comparar os três níveis, não para dizer a extensão do alagamento. Onde
 existe mancha oficial, ela tem prioridade.
 
+Há dois modos, escolhidos na barra lateral:
+
+**Envelope da projeção** (padrão) — a mancha é da **cota projetada** pelo
+modelo, e as três cores marcam a incerteza:
+
+| Cor | Cota | Leitura |
+|---|---|---|
+| 🔴 vermelho | projetada − erro | a água chega aqui mesmo no cenário otimista |
+| 🟠 laranja | projetada | estimativa central do modelo |
+| 🟡 amarelo | projetada + erro | pior caso dentro do erro observado |
+
+A largura do envelope é o **erro típico que o modelo cometeu na validação
+walk-forward** — não um intervalo de confiança formal, mas o que se pode
+afirmar com os dados. Em Encantado no evento de julho, a projeção de +25 h saiu
+em 1.397 cm com envelope de 1.256 a 1.537 cm (±140 cm).
+
+**Limiares fixos** — as três cotas oficiais de atenção, alerta e inundação,
+independentes da projeção.
+
 Resultado: as 44 estações com cota oficial passam a ter as três cores —
 **nenhuma fica sem cobertura**.
 

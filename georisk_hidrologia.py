@@ -888,6 +888,10 @@ class ModeloHorizonte:
     delta_minimo: float          # envelope físico observado no histórico
     delta_maximo: float
     n_amostras: int
+    # Erro típico da previsão, em cm, medido FORA da amostra na validação
+    # walk-forward. É o que dá largura ao envelope de incerteza: a projeção
+    # central mais ou menos este valor cobre a faixa de erro observada.
+    erro_cm: float = 0.0
 
     def prever_delta(self, x_atual: np.ndarray) -> float:
         """Variação de cota prevista, já limitada ao envelope histórico."""
@@ -935,6 +939,7 @@ def _treinar_horizonte(
     tamanho_bloco = len(X) // n_blocos
     erro_modelo_total = 0.0
     erro_persistencia_total = 0.0
+    n_validacao = 0
     ss_res_total = 0.0
     ss_tot_total = 0.0
 
@@ -957,9 +962,13 @@ def _treinar_horizonte(
         previsto_v = montar(Xv) @ beta_f
 
         erro_modelo_total += float(((yv - previsto_v) ** 2).sum())
+        n_validacao += len(yv)
         erro_persistencia_total += float((yv ** 2).sum())   # persistência: ΔH = 0
         ss_res_total += float(((yv - previsto_v) ** 2).sum())
         ss_tot_total += float(((yv - yv.mean()) ** 2).sum())
+
+    n_val = max(int(n_validacao), 1)
+    erro_cm = float(np.sqrt(erro_modelo_total / n_val))
 
     ganho_walk = (
         1.0 - erro_modelo_total / erro_persistencia_total
@@ -990,6 +999,7 @@ def _treinar_horizonte(
         media=media,
         desvio=desvio,
         ganho_validacao=ganho_walk,
+        erro_cm=round(erro_cm, 1),
         r2_validacao=r2_walk,
         r2_treino=r2(X_treino, y_treino),
         delta_minimo=float(np.percentile(y, 0.5)),
@@ -1656,6 +1666,7 @@ def estimar_tempo_e_impacto_inundacao(
 
     instantes, valores, r2_val, r2_tre, ganhos = [], [], [], [], []
     ganho_por_horizonte: list[float] = []
+    erros: list[float] = []
 
     for fracao in FRACOES_HORIZONTE:
         horas = tempo.tc_horas * fracao
@@ -1668,6 +1679,7 @@ def estimar_tempo_e_impacto_inundacao(
         projetado = cota_agora + modelo.prever_delta(x_atual_np)
         instantes.append(instante_atual + timedelta(hours=horas))
         valores.append(float(np.clip(projetado, 0.0, teto)))
+        erros.append(modelo.erro_cm)
         r2_val.append(modelo.r2_validacao)
         r2_tre.append(modelo.r2_treino)
         ganhos.append(modelo.ganho_validacao)
@@ -1696,6 +1708,13 @@ def estimar_tempo_e_impacto_inundacao(
             "instante": instante.strftime("%Y-%m-%d %H:%M:%S"),
             "horas_a_frente": round((instante - instante_atual).total_seconds() / 3600, 2),
             "cota_projetada_cm": round(valor, 1),
+            # ENVELOPE DE INCERTEZA: a projeção central mais ou menos o erro
+            # típico medido fora da amostra. Não é intervalo de confiança
+            # formal — é a faixa de erro que o modelo de fato cometeu na
+            # validação walk-forward, que é o que se pode afirmar com os dados.
+            "cota_minima_cm": round(max(0.0, valor - (erros[i] if i < len(erros) else 0)), 1),
+            "cota_maxima_cm": round(valor + (erros[i] if i < len(erros) else 0), 1),
+            "erro_tipico_cm": round(erros[i], 1) if i < len(erros) else None,
             "ganho_sobre_persistencia": (
                 ganho_por_horizonte[i] if i < len(ganho_por_horizonte) else None
             ),

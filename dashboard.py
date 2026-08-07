@@ -428,10 +428,19 @@ def _candidatos_de_nome(linha) -> list[str]:
     return nomes
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _projecao_cacheada(estacao_id: str) -> dict:
+    """Projeção da estação, sem a figura (que não é serializável no cache)."""
+    resultado = gh.estimar_tempo_e_impacto_inundacao(estacao_id)
+    resultado.pop("grafico_hietograma_hidrograma", None)
+    return resultado
+
+
 def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
                               mostrar_cota: bool, mostrar_evento: bool,
                               camadas=("atencao", "alerta", "inundacao", "atual"),
-                              mostrar_faixas: bool = True) -> dict:
+                              mostrar_faixas: bool = True,
+                              modo_faixa: str = "envelope") -> dict:
     """Desenha as manchas OFICIAIS de cada estação, uma por nível de risco.
 
     Em vez de uma mancha só, projeta as TRÊS COTAS DE RISCO da estação —
@@ -572,16 +581,37 @@ def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
                 "alerta": est.get("cota_alerta_cm"),
                 "inundacao": est.get("cota_inundacao_cm"),
             }
-            if any(pd.notna(v) for v in cotas.values()):
-                try:
+            rio_nome = None if pd.isna(est.get("rio")) else est.get("rio")
+            faixas = []
+            try:
+                if modo_faixa == "envelope":
+                    # Mancha da COTA PROJETADA, cores = incerteza do modelo.
+                    # Cacheado: rodar o modelo por estação a cada rerun do
+                    # mapa levava ~30 s para 10 estações.
+                    proj = _projecao_cacheada(est["id"])
+                    pontos = proj.get("projecao") or []
+                    if pontos:
+                        # Horizonte útil se existir; senão o primeiro.
+                        util = proj.get("horizonte_util_horas")
+                        alvo_p = next(
+                            (p for p in pontos if util and p["horas_a_frente"] <= util),
+                            pontos[0],
+                        )
+                        faixas = gg.faixas_de_incerteza(
+                            est["lat"], est["lon"],
+                            alvo_p["cota_minima_cm"], alvo_p["cota_projetada_cm"],
+                            alvo_p["cota_maxima_cm"], nome_rio=rio_nome,
+                        )
+                elif any(pd.notna(v) for v in cotas.values()):
                     faixas = gg.faixas_de_risco(
-                        est["lat"], est["lon"], cotas,
-                        nome_rio=(None if pd.isna(est.get("rio")) else est.get("rio")),
+                        est["lat"], est["lon"], cotas, nome_rio=rio_nome,
                     )
-                except Exception:
-                    faixas = []
+            except Exception:
+                faixas = []
+
+            if True:
                 for faixa in faixas:
-                    if faixa["nivel"] not in camadas:
+                    if modo_faixa == "limiares" and faixa["nivel"] not in camadas:
                         continue
                     folium.GeoJson(
                         faixa["geojson"],
@@ -595,9 +625,11 @@ def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
                             }
                         ),
                         tooltip=(
-                            f"<b>{est['nome']} — Cota de {faixa['rotulo']}</b><br>"
-                            f"Limiar oficial: {faixa['cota_cm']:.0f} cm<br>"
-                            f"Faixa estimada: ±{faixa['largura_estimada_m']:.0f} m<br>"
+                            f"<b>{est['nome']} — {faixa['rotulo']}</b><br>"
+                            f"Cota: {faixa['cota_cm']:.0f} cm<br>"
+                            + (f"<i>{faixa['leitura']}</i><br>"
+                               if faixa.get("leitura") else "")
+                            + f"Faixa estimada: ±{faixa['largura_estimada_m']:.0f} m<br>"
                             f"<i>Traçado do rio: IBGE 1:100.000. Largura é "
                             f"ESTIMATIVA, não mancha modelada.</i>"
                         ),
@@ -746,8 +778,15 @@ with tab_manchas:
         ver_eixo_rio = st.checkbox("🟢 Eixo do Rio (esquemático)", value=False)
 
         st.markdown("---")
+        modo_faixa = st.radio(
+            "Faixas sobre o rio real:",
+            ["Envelope da projeção", "Limiares fixos (atenção/alerta/inundação)"],
+            help="O envelope mostra a mancha da COTA PROJETADA com as cores "
+                 "marcando a incerteza do modelo. Os limiares fixos mostram as "
+                 "três cotas oficiais, independentes da projeção.",
+        )
         ver_faixas = st.checkbox(
-            "🌊 Faixas sobre o rio real (onde não há mancha oficial)", value=True,
+            "🌊 Exibir faixas (onde não há mancha oficial)", value=True,
             help="Traçado da hidrografia oficial do IBGE (1:100.000) com largura "
                  "estimada pela cota. NÃO é mancha modelada — cobre as estações "
                  "que o SGB não mapeou, como Estrela, Encantado e Muçum.",
@@ -792,6 +831,7 @@ with tab_manchas:
         resumo_oficial = desenhar_manchas_oficiais(
             mapa_sat, alvos, opac_val, ver_oficial_cota, ver_oficial_evento,
             camadas=_camadas, mostrar_faixas=ver_faixas,
+            modo_faixa="envelope" if modo_faixa.startswith("Envelope") else "limiares",
         )
 
         for _, est in (alvos.iterrows() if ver_esquematico else iter([])):

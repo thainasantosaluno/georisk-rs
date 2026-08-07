@@ -1401,6 +1401,100 @@ def faixas_de_risco(
     return saida
 
 
+def faixas_de_incerteza(
+    lat: float,
+    lon: float,
+    cota_min_cm: float,
+    cota_projetada_cm: float,
+    cota_max_cm: float,
+    nome_rio: str | None = None,
+    db_path: str = CAMINHO_BANCO_PADRAO,
+) -> list[dict]:
+    """Mancha da COTA PROJETADA, com as cores marcando a incerteza.
+
+    Diferente de `faixas_de_risco`, que desenha os limiares fixos de
+    atenção/alerta/inundação. Aqui as três manchas saem do envelope da própria
+    projeção — mínimo, central e máximo — e a leitura é de confiança:
+
+        vermelho  cota mínima ...... a água chega aqui mesmo no cenário otimista
+        laranja   cota projetada ... estimativa central do modelo
+        amarelo   cota máxima ...... pior caso dentro do erro observado
+
+    A largura do envelope é o erro típico que o modelo cometeu na validação
+    walk-forward, não um intervalo de confiança formal. É o que se pode afirmar
+    com os dados: a faixa de erro que ele de fato produziu fora da amostra.
+
+    Desenhadas da maior para a menor, para todas ficarem visíveis.
+    """
+    from shapely.geometry import LineString, Point, mapping
+    from shapely.ops import unary_union
+    import math
+
+    dados = drenagem_proxima(lat, lon, db_path=db_path)
+    feicoes = dados.get("features", [])
+    if not feicoes:
+        return []
+
+    alvo = _normalizar(nome_rio) if nome_rio else None
+    linhas = []
+    for f in feicoes:
+        nome = _normalizar(f.get("properties", {}).get("nome") or "")
+        if alvo and nome and alvo not in nome and nome not in alvo:
+            continue
+        for coords in _linha_para_pontos(f.get("geometry") or {}):
+            if len(coords) >= 2:
+                linhas.append(LineString(coords))
+    if not linhas:
+        for f in feicoes:
+            for coords in _linha_para_pontos(f.get("geometry") or {}):
+                if len(coords) >= 2:
+                    linhas.append(LineString(coords))
+    if not linhas:
+        return []
+
+    estacao = Point(lon, lat)
+    perto = [l for l in linhas if l.distance(estacao) <= RAIO_FAIXA_GRAUS]
+    eixo = unary_union(perto or linhas)
+
+    grau_lat = 1.0 / 110540.0
+    grau_lon = 1.0 / (111320.0 * max(math.cos(math.radians(lat)), 0.1))
+    grau_medio = (grau_lat + grau_lon) / 2
+
+    # Maior primeiro: o pior caso fica por baixo e os mais certos por cima.
+    niveis = [
+        ("maxima", "Pior caso", cota_max_cm, "#ffeb3b", "#fbc02d",
+         "limite superior do erro observado"),
+        ("projetada", "Projeção central", cota_projetada_cm, "#ff9800", "#e65100",
+         "estimativa do modelo"),
+        ("minima", "Alta confiança", cota_min_cm, "#f44336", "#b71c1c",
+         "a água chega aqui mesmo no cenário otimista"),
+    ]
+
+    saida = []
+    for chave, rotulo, cota, preenche, borda, leitura in niveis:
+        if cota is None or pd.isna(cota) or float(cota) <= 0:
+            continue
+        largura_m = min(
+            float(cota) / 100.0 * METROS_POR_METRO_DE_COTA, LARGURA_MAXIMA_M
+        )
+        poligono = eixo.buffer(largura_m * grau_medio, resolution=4)
+        poligono = poligono.simplify(TOLERANCIA_SIMPLIFICACAO, preserve_topology=True)
+        if poligono.is_empty:
+            continue
+        saida.append({
+            "nivel": chave,
+            "rotulo": rotulo,
+            "leitura": leitura,
+            "cota_cm": float(cota),
+            "largura_estimada_m": round(largura_m),
+            "cor_preenchimento": preenche,
+            "cor_borda": borda,
+            "geojson": {"type": "Feature", "properties": {},
+                        "geometry": mapping(poligono)},
+        })
+    return saida
+
+
 if __name__ == "__main__":
     import argparse
 
