@@ -430,7 +430,8 @@ def _candidatos_de_nome(linha) -> list[str]:
 
 def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
                               mostrar_cota: bool, mostrar_evento: bool,
-                              camadas=("atencao", "alerta", "inundacao", "atual")) -> dict:
+                              camadas=("atencao", "alerta", "inundacao", "atual"),
+                              mostrar_faixas: bool = True) -> dict:
     """Desenha as manchas OFICIAIS de cada estação, uma por nível de risco.
 
     Em vez de uma mancha só, projeta as TRÊS COTAS DE RISCO da estação —
@@ -447,7 +448,7 @@ def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
     de atenção), então desenhamos da maior para a menor: assim todas ficam
     visíveis, em vez de a maior cobrir as outras.
     """
-    resumo = {"por_cota": [], "por_evento": [], "sem_mancha": []}
+    resumo = {"por_cota": [], "por_evento": [], "por_faixa": [], "sem_mancha": []}
     ja_desenhado = set()
 
     # Ordem de desenho: maior área primeiro (fica por baixo).
@@ -558,6 +559,52 @@ def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
                     resumo["por_evento"].append(evento["municipio"])
                 achou = True
                 break
+
+        # --- FAIXAS SOBRE A HIDROGRAFIA OFICIAL
+        # Só 5 municípios têm mancha modelada pelo SGB. Para os demais — que
+        # incluem Estrela, Encantado e Muçum — desenhamos faixas ao longo do
+        # curso REAL do rio (hidrografia do IBGE, 1:100.000), com largura
+        # estimada pela cota. O traçado é oficial; a largura é estimativa,
+        # não mancha modelada.
+        if not achou and mostrar_faixas:
+            cotas = {
+                "atencao": est.get("cota_atencao_cm"),
+                "alerta": est.get("cota_alerta_cm"),
+                "inundacao": est.get("cota_inundacao_cm"),
+            }
+            if any(pd.notna(v) for v in cotas.values()):
+                try:
+                    faixas = gg.faixas_de_risco(
+                        est["lat"], est["lon"], cotas,
+                        nome_rio=(None if pd.isna(est.get("rio")) else est.get("rio")),
+                    )
+                except Exception:
+                    faixas = []
+                for faixa in faixas:
+                    if faixa["nivel"] not in camadas:
+                        continue
+                    folium.GeoJson(
+                        faixa["geojson"],
+                        name=f"{faixa['rotulo']} — {est['nome']}",
+                        style_function=(
+                            lambda _f, o=opacidade, p=faixa["cor_preenchimento"],
+                                   b=faixa["cor_borda"]: {
+                                "fillColor": p, "color": b,
+                                "weight": 1, "fillOpacity": o * 0.75,
+                                "dashArray": "4,3",
+                            }
+                        ),
+                        tooltip=(
+                            f"<b>{est['nome']} — Cota de {faixa['rotulo']}</b><br>"
+                            f"Limiar oficial: {faixa['cota_cm']:.0f} cm<br>"
+                            f"Faixa estimada: ±{faixa['largura_estimada_m']:.0f} m<br>"
+                            f"<i>Traçado do rio: IBGE 1:100.000. Largura é "
+                            f"ESTIMATIVA, não mancha modelada.</i>"
+                        ),
+                    ).add_to(mapa)
+                if faixas:
+                    achou = True
+                    resumo.setdefault("por_faixa", []).append(est["nome"])
 
         if not achou:
             resumo["sem_mancha"].append(est.get("nome"))
@@ -699,6 +746,13 @@ with tab_manchas:
         ver_eixo_rio = st.checkbox("🟢 Eixo do Rio (esquemático)", value=False)
 
         st.markdown("---")
+        ver_faixas = st.checkbox(
+            "🌊 Faixas sobre o rio real (onde não há mancha oficial)", value=True,
+            help="Traçado da hidrografia oficial do IBGE (1:100.000) com largura "
+                 "estimada pela cota. NÃO é mancha modelada — cobre as estações "
+                 "que o SGB não mapeou, como Estrela, Encantado e Muçum.",
+        )
+
         ver_esquematico = st.checkbox(
             "Exibir desenho esquemático", value=False,
             help="Senos e cossenos ao redor da estação. NÃO é mancha medida — "
@@ -737,7 +791,7 @@ with tab_manchas:
         )
         resumo_oficial = desenhar_manchas_oficiais(
             mapa_sat, alvos, opac_val, ver_oficial_cota, ver_oficial_evento,
-            camadas=_camadas,
+            camadas=_camadas, mostrar_faixas=ver_faixas,
         )
 
         for _, est in (alvos.iterrows() if ver_esquematico else iter([])):

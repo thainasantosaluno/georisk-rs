@@ -189,8 +189,35 @@ Vale do Taquari têm mapa navegável, de onde sai KML.
 A SEMA-RS não publica mancha consumível: o `geoportal.sema.rs.gov.br` está no
 ar mas serve apenas a página padrão do IIS.
 
-Onde não há mancha oficial, o painel diz isso — o traçado esquemático de senos
-e cossenos virou opção desligada por padrão.
+### Faixas sobre a hidrografia oficial — cobrindo o resto
+
+Só 5 municípios têm mancha modelada, e as estações que mais importam hoje
+(Estrela, Encantado, Muçum, Bom Retiro do Sul) não estão entre elas. Para essas,
+o painel desenha **faixas ao longo do curso real do rio**, nas três cotas.
+
+| | |
+|---|---|
+| **Real** | traçado, posição e nome do rio — hidrografia do IBGE `BC100_RS_2021`, 1:100.000 |
+| **Real** | as cotas de atenção/alerta/inundação, oficiais do SACE |
+| **Estimado** | a largura da faixa em cada cota |
+
+A largura **não é mancha modelada**. Sem MDE e sem seção transversal não há como
+derivar até onde a água chega; a faixa é proporcional à altura da cota e serve
+para comparar os três níveis, não para dizer a extensão do alagamento. Onde
+existe mancha oficial, ela tem prioridade.
+
+Resultado: as 44 estações com cota oficial passam a ter as três cores —
+**nenhuma fica sem cobertura**.
+
+Duas medidas foram necessárias para isso ser usável. As faixas brutas davam
+1 MB de GeoJSON por estação, 44 MB no HTML, e o navegador travava antes de
+desenhar; simplificar a ~55 m de tolerância (irrelevante numa faixa de centenas
+de metros) reduziu para 26 KB por estação. E a busca traz ~120 trechos num raio
+de 11 km, o que desenhava toda a rede de afluentes — restringir a 5 km deixa a
+faixa reconhecível.
+
+O traçado esquemático de senos e cossenos continua existindo como opção
+desligada, para comparação.
 
 ### Curve Number real por bacia
 

@@ -63,6 +63,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 import requests
 import urllib3
 
@@ -208,6 +209,12 @@ def criar_schema_geo(db_path: str = CAMINHO_BANCO_PADRAO) -> None:
                 amostras       INTEGER,
                 composicao     TEXT,   -- JSON: distribuição de solo e uso
                 calculado_em   TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS drenagem_cache (
+                chave     TEXT PRIMARY KEY,   -- lat_lon_raio arredondados
+                geojson   TEXT,
+                obtido_em TEXT
             );
 
             CREATE TABLE IF NOT EXISTS caracterizacao_bacia (
@@ -1212,6 +1219,186 @@ def conferir_tc(bacia_rotulo: str | None, tc_horas: float | None,
         "tc_medido_h": tc_horas,
         "veredito": veredito,
     }
+
+
+# -----------------------------------------------------------------------------
+# FAIXAS DE RISCO SOBRE A HIDROGRAFIA OFICIAL
+# -----------------------------------------------------------------------------
+# Só 5 municípios do RS têm mancha modelada pelo SGB/IPH-UFRGS. Para os outros
+# não existe mancha oficial — e as estações que mais importam hoje (Estrela,
+# Encantado, Muçum, Bom Retiro do Sul) estão justamente entre elas.
+#
+# A versão original do projeto preenchia esse vazio com senos e cossenos ao
+# redor da estação: um rio inventado, que não existe no terreno. Aqui o traçado
+# é REAL — vem da hidrografia oficial do IBGE (`BC100_RS_2021_Trecho_Drenagem_L`,
+# escala 1:100.000, com os cursos nomeados) — e o que é estimado é apenas a
+# LARGURA da faixa.
+#
+# O QUE É REAL E O QUE É ESTIMADO
+# --------------------------------
+#   real      : o curso do rio, a posição, o nome, a rede de afluentes
+#   real      : as cotas de atenção/alerta/inundação (oficiais do SACE)
+#   ESTIMADO  : a largura da faixa em cada cota
+#
+# A largura NÃO é mancha de inundação modelada. Sem MDE e sem seção
+# transversal, não há como derivar até onde a água chega. A faixa é
+# proporcional à altura da cota, o que dá noção comparativa entre os três
+# níveis de risco — não a extensão real do alagamento.
+#
+# Por isso as faixas saem sempre rotuladas como estimativa, e onde EXISTE
+# mancha oficial ela tem prioridade: o painel desenha a modelada, não esta.
+
+CAMADA_DRENAGEM_RS = "CCAR:BC100_RS_2021_Trecho_Drenagem_L"
+
+# Quantos graus ao redor da estação buscar trechos de rio (~11 km).
+RAIO_DRENAGEM_GRAUS = 0.10
+
+# Metros de faixa para cada metro de cota. Valor de ordem de grandeza: numa
+# planície de vale encaixado, 1 m de lâmina espalha algumas dezenas de metros
+# para cada lado. É PARÂMETRO, não medição.
+METROS_POR_METRO_DE_COTA = 40.0
+
+# Teto para a faixa não virar um borrão no mapa.
+LARGURA_MAXIMA_M = 2500.0
+
+# Tolerância de simplificação, em graus (~55 m). Sem isso cada faixa sai com
+# dezenas de milhares de vértices: medido, 1 MB de GeoJSON por estação, o que
+# dava 44 MB no HTML e travava o navegador antes de desenhar qualquer coisa.
+# Numa faixa cuja largura já é estimativa de centenas de metros, 55 m de
+# tolerância não muda nada visualmente.
+TOLERANCIA_SIMPLIFICACAO = 0.0005
+
+# Só os trechos de rio até esta distância da estação entram na faixa. Buscar
+# 11 km ao redor traz a bacia toda de afluentes; o que interessa é o rio na
+# vizinhança da estação.
+RAIO_FAIXA_GRAUS = 0.045
+
+
+def _linha_para_pontos(geometria: dict) -> list[list[list[float]]]:
+    """Extrai listas de coordenadas de LineString ou MultiLineString."""
+    tipo = geometria.get("type")
+    if tipo == "LineString":
+        return [geometria["coordinates"]]
+    if tipo == "MultiLineString":
+        return list(geometria["coordinates"])
+    return []
+
+
+def drenagem_proxima(
+    lat: float, lon: float, raio_graus: float = RAIO_DRENAGEM_GRAUS,
+    db_path: str = CAMINHO_BANCO_PADRAO,
+) -> dict:
+    """Trechos de rio da hidrografia oficial do IBGE ao redor de um ponto.
+
+    Fica em cache no banco: a hidrografia não muda, e cada consulta ao WFS
+    custa alguns segundos.
+    """
+    criar_schema_geo(db_path)
+    chave = f"{round(lat, 2)}_{round(lon, 2)}_{raio_graus}"
+
+    with _conectar(db_path) as con:
+        linha = con.execute(
+            "SELECT geojson FROM drenagem_cache WHERE chave = ?", (chave,)
+        ).fetchone()
+    if linha:
+        return json.loads(linha[0])
+
+    caixa = (lon - raio_graus, lat - raio_graus, lon + raio_graus, lat + raio_graus)
+    try:
+        dados = _wfs_geojson(CAMADA_DRENAGEM_RS, caixa)
+    except Exception:
+        dados = {"type": "FeatureCollection", "features": []}
+
+    with _conectar(db_path) as con:
+        con.execute(
+            "INSERT OR REPLACE INTO drenagem_cache (chave, geojson, obtido_em) "
+            "VALUES (?,?,?)",
+            (chave, json.dumps(dados), _agora()),
+        )
+    return dados
+
+
+def faixas_de_risco(
+    lat: float,
+    lon: float,
+    cotas_cm: dict[str, float],
+    nome_rio: str | None = None,
+    db_path: str = CAMINHO_BANCO_PADRAO,
+) -> list[dict]:
+    """Faixas ao longo do rio real, uma por nível de risco.
+
+    `cotas_cm` é {"atencao": x, "alerta": y, "inundacao": z}. Devolve, da maior
+    para a menor, dicionários com o polígono em GeoJSON pronto para o folium.
+
+    A geometria da linha é oficial; a largura é estimativa proporcional à cota.
+    """
+    from shapely.geometry import LineString, mapping
+    from shapely.ops import unary_union
+
+    dados = drenagem_proxima(lat, lon, db_path=db_path)
+    feicoes = dados.get("features", [])
+    if not feicoes:
+        return []
+
+    # Prioriza o rio da estação; sem nome, usa toda a drenagem próxima.
+    alvo = _normalizar(nome_rio) if nome_rio else None
+    linhas = []
+    for f in feicoes:
+        nome = _normalizar(f.get("properties", {}).get("nome") or "")
+        if alvo and nome and alvo not in nome and nome not in alvo:
+            continue
+        for coords in _linha_para_pontos(f.get("geometry") or {}):
+            if len(coords) >= 2:
+                linhas.append(LineString(coords))
+    if not linhas:  # nenhum trecho com o nome do rio: usa o que houver por perto
+        for f in feicoes:
+            for coords in _linha_para_pontos(f.get("geometry") or {}):
+                if len(coords) >= 2:
+                    linhas.append(LineString(coords))
+    if not linhas:
+        return []
+
+    # Mantém só os trechos perto da estação: a busca traz ~120 segmentos num
+    # raio de 11 km, e desenhar toda a rede de afluentes deixa a faixa
+    # irreconhecível além de pesada.
+    from shapely.geometry import Point
+    estacao = Point(lon, lat)
+    perto = [l for l in linhas if l.distance(estacao) <= RAIO_FAIXA_GRAUS]
+    eixo = unary_union(perto or linhas)
+    import math
+    graus_por_metro_lat = 1.0 / 110540.0
+    graus_por_metro_lon = 1.0 / (111320.0 * max(math.cos(math.radians(lat)), 0.1))
+    grau_medio = (graus_por_metro_lat + graus_por_metro_lon) / 2
+
+    ordem = [
+        ("inundacao", "Inundação", "#f44336", "#b71c1c"),
+        ("alerta", "Alerta", "#ff9800", "#e65100"),
+        ("atencao", "Atenção", "#ffeb3b", "#fbc02d"),
+    ]
+
+    saida = []
+    for chave, rotulo, preenche, borda in ordem:
+        cota = cotas_cm.get(chave)
+        if cota is None or pd.isna(cota):
+            continue
+        largura_m = min(
+            float(cota) / 100.0 * METROS_POR_METRO_DE_COTA, LARGURA_MAXIMA_M
+        )
+        poligono = eixo.buffer(largura_m * grau_medio, resolution=4)
+        poligono = poligono.simplify(TOLERANCIA_SIMPLIFICACAO, preserve_topology=True)
+        if poligono.is_empty:
+            continue
+        saida.append({
+            "nivel": chave,
+            "rotulo": rotulo,
+            "cota_cm": float(cota),
+            "largura_estimada_m": round(largura_m),
+            "cor_preenchimento": preenche,
+            "cor_borda": borda,
+            "geojson": {"type": "Feature", "properties": {},
+                        "geometry": mapping(poligono)},
+        })
+    return saida
 
 
 if __name__ == "__main__":
