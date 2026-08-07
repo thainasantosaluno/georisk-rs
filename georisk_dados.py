@@ -1278,13 +1278,21 @@ def serie_historica_ana(
         )
 
     df = pd.DataFrame(list(registros.values())).sort_values("datahora")
+
+    # `valor` = máximo do dia entre TODAS as séries que a fonte trouxe.
+    #
+    # Não dá para fixar as colunas em ("media_diaria", "leitura_07h",
+    # "leitura_17h"): isso vale para cota, mas a chuva vem com outro padrão de
+    # hora e caía fora da conta, produzindo NaN em toda a série. Somar o que
+    # existir cobre os dois casos e qualquer variação futura da fonte.
+    colunas_serie = [
+        c for c in df.columns if c not in ("datahora", "consistencia")
+    ]
+    df["valor"] = df[colunas_serie].max(axis=1) if colunas_serie else np.nan
+
     for coluna in ("media_diaria", "leitura_07h", "leitura_17h"):
         if coluna not in df.columns:
             df[coluna] = np.nan
-
-    # `valor` = máximo do dia entre as séries disponíveis. É o que representa a
-    # cheia; a média diária fica na coluna própria para quem precisar dela.
-    df["valor"] = df[["media_diaria", "leitura_07h", "leitura_17h"]].max(axis=1)
 
     return df[
         ["datahora", "valor", "media_diaria", "leitura_07h", "leitura_17h",

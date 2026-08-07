@@ -359,6 +359,60 @@ aquele dia. Usar apenas a média perderia o pico, que é exatamente o que
 interessa em análise de cheia. Por isso `serie_historica_ana()` devolve as três
 colunas separadas e `valor` = máximo do dia.
 
+### Validação da metodologia contra 15 anos de dado
+
+Rodada em 10 estações da bacia do Taquari-Antas, ~5.000 dias cada, chuva de
+Auler e Guaporé, subida diária da cota como alvo.
+
+**Primeiro achado: a resposta é no MESMO dia.** Correlacionando a chuva com a
+subida em diferentes defasagens em Encantado:
+
+| Defasagem | Chuva bruta | Chuva efetiva |
+|---|---|---|
+| **mesmo dia** | 0,489 | **0,515** |
+| dia seguinte | 0,142 | 0,034 |
+| 2 dias | −0,217 | −0,262 |
+
+Coerente com o Tc de ~12 h da estação. Uma primeira versão deste teste mediu no
+dia seguinte e concluiu, erradamente, que o método piorava tudo.
+
+**Segundo achado: o método separa cheia de não-cheia.** Nos 31 dias de cheia
+contra os dias normais em Encantado:
+
+| | Dias de cheia | Dias normais | Razão |
+|---|---|---|---|
+| Chuva bruta | 60,6 mm | 5,0 mm | 12× |
+| **Chuva efetiva** | 21,1 mm | 0,48 mm | **44×** |
+
+A chuva efetiva discrimina quase quatro vezes melhor que a lâmina bruta.
+
+**Terceiro achado, e o mais desconfortável: na média das 10 estações, o SCS-CN
+não supera a chuva bruta.**
+
+| | Média das 10 estações |
+|---|---|
+| Chuva bruta | **0,485** |
+| Chuva efetiva, CN fixo | 0,454 |
+| + encharcamento (literatura) | 0,476 |
+| + encharcamento calibrado | 0,478 |
+
+O encharcamento recupera parte do que o CN fixo perde (+0,022), mas o conjunto
+ainda fica abaixo da chuva bruta na correlação linear com a subida diária.
+
+Em 3 das 10 estações o método ganha (Encantado 0,489→0,549; Lajeado
+0,507→0,524; 86472000 0,551→0,611); nas outras 7, perde.
+
+**A calibração dos limiares não se justifica.** O ótimo em Encantado
+(meia-vida 30 dias, saturação 350 mm) rende +0,029 lá, mas na média das 10
+estações o ganho sobre os valores de literatura é de +0,002 — ruído. Os
+parâmetros seguem nos valores da literatura, que ao menos têm respaldo.
+
+**Leitura honesta.** A correlação linear com a subida diária não é o melhor
+juiz do método: o SCS-CN foi feito para estimar volume de escoamento de um
+evento, não para maximizar correlação ponto a ponto — e é justamente em evento
+que ele se sai bem (a razão de 44× acima). Mas o resultado impede afirmar que a
+transformação melhora a previsão em geral, e isso fica registrado.
+
 ### O que isso permite — e o que não permite
 
 **Permite** calibrar os limiares de encharcamento contra dezenas de cheias
