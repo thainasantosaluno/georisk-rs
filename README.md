@@ -209,13 +209,23 @@ existe mancha oficial, ela tem prioridade.
 Há dois modos, escolhidos na barra lateral:
 
 **Envelope da projeção** (padrão) — a mancha é da **cota projetada** pelo
-modelo, e as três cores marcam a incerteza:
+modelo, e as cores formam um gradiente de risco do rio para fora:
 
 | Cor | Cota | Leitura |
 |---|---|---|
-| 🔴 vermelho | projetada − erro | a água chega aqui mesmo no cenário otimista |
-| 🟠 laranja | projetada | estimativa central do modelo |
-| 🟡 amarelo | projetada + erro | pior caso dentro do erro observado |
+| 🔴 **Extremo alerta** | projetada − erro | a água chega aqui mesmo no cenário otimista |
+| 🟠 **Alerta** | projetada | projeção central do modelo |
+| 🟡 **Atenção** | projetada + erro | pior caso dentro do erro observado |
+| 🟢 **Seguro** | pior caso × 1,5 | além do alcance projetado, com margem |
+
+O verde não é uma cota medida: é a área que a projeção **não** alcança, com 50 %
+de folga sobre o limite superior do erro. É ele que dá sentido operacional ao
+mapa — sem ele, quem está na borda do desenho não sabe se está fora do alcance
+ou apenas fora do que foi desenhado. Vai quase transparente, só com o contorno,
+porque sendo a maior de todas cobriria as faixas de risco por dentro.
+
+A folga de 50 % é deliberada: errar chamando de perigoso o que é seguro custa
+menos que o contrário.
 
 A largura do envelope é o **erro típico que o modelo cometeu na validação
 walk-forward** — não um intervalo de confiança formal, mas o que se pode

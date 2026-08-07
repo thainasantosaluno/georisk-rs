@@ -617,11 +617,17 @@ def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
                         faixa["geojson"],
                         name=f"{faixa['rotulo']} — {est['nome']}",
                         style_function=(
+                            # A área segura é desenhada quase transparente: ela
+                            # é a MAIOR de todas e, cheia, esconderia as faixas
+                            # de risco que ficam por dentro. O que interessa
+                            # nela é o contorno, que marca o limite do alcance.
                             lambda _f, o=opacidade, p=faixa["cor_preenchimento"],
-                                   b=faixa["cor_borda"]: {
+                                   b=faixa["cor_borda"],
+                                   seg=faixa.get("eh_area_segura", False): {
                                 "fillColor": p, "color": b,
-                                "weight": 1, "fillOpacity": o * 0.75,
-                                "dashArray": "4,3",
+                                "weight": 2 if seg else 1,
+                                "fillOpacity": 0.10 if seg else o * 0.75,
+                                "dashArray": "6,4" if seg else "4,3",
                             }
                         ),
                         tooltip=(

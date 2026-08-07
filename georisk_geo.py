@@ -1261,6 +1261,12 @@ METROS_POR_METRO_DE_COTA = 40.0
 # Teto para a faixa não virar um borrão no mapa.
 LARGURA_MAXIMA_M = 2500.0
 
+# Quanto a área "segura" se estende além do pior caso projetado. 1,5 dá uma
+# margem de 50 % sobre o limite superior do erro — é folga deliberada, porque
+# errar para o lado de chamar de perigoso o que é seguro custa menos que o
+# contrário.
+MARGEM_AREA_SEGURA = 1.5
+
 # Tolerância de simplificação, em graus (~55 m). Sem isso cada faixa sai com
 # dezenas de milhares de vértices: medido, 1 MB de GeoJSON por estação, o que
 # dava 44 MB no HTML e travava o navegador antes de desenhar qualquer coisa.
@@ -1409,6 +1415,7 @@ def faixas_de_incerteza(
     cota_max_cm: float,
     nome_rio: str | None = None,
     db_path: str = CAMINHO_BANCO_PADRAO,
+    cota_atual_cm: float | None = None,
 ) -> list[dict]:
     """Mancha da COTA PROJETADA, com as cores marcando a incerteza.
 
@@ -1416,9 +1423,19 @@ def faixas_de_incerteza(
     atenção/alerta/inundação. Aqui as três manchas saem do envelope da própria
     projeção — mínimo, central e máximo — e a leitura é de confiança:
 
-        vermelho  cota mínima ...... a água chega aqui mesmo no cenário otimista
-        laranja   cota projetada ... estimativa central do modelo
-        amarelo   cota máxima ...... pior caso dentro do erro observado
+        vermelho  EXTREMO ALERTA .. a água chega aqui mesmo no cenário otimista
+        laranja   ALERTA .......... projeção central do modelo
+        amarelo   ATENÇÃO ......... pior caso dentro do erro observado
+        verde     SEGURO .......... além do alcance projetado
+
+    A leitura é de fora para dentro: quanto mais perto do rio, maior o risco. O
+    verde não é uma cota — é a área que a projeção NÃO alcança, com a margem
+    do erro do modelo já somada. Marca até onde se pode considerar seguro
+    segundo esta projeção, e é o que dá sentido operacional ao mapa: sem ele o
+    usuário não sabe se está fora do alcance ou apenas fora do desenho.
+
+    As larguras vêm do envelope da projeção — mínima, central e máxima — cujo
+    espaçamento é o erro típico que o modelo cometeu na validação walk-forward.
 
     A largura do envelope é o erro típico que o modelo cometeu na validação
     walk-forward, não um intervalo de confiança formal. É o que se pode afirmar
@@ -1460,20 +1477,32 @@ def faixas_de_incerteza(
     grau_lon = 1.0 / (111320.0 * max(math.cos(math.radians(lat)), 0.1))
     grau_medio = (grau_lat + grau_lon) / 2
 
-    # Maior primeiro: o pior caso fica por baixo e os mais certos por cima.
+    # A faixa segura vai ALÉM do pior caso, com margem — é o que sobra fora do
+    # alcance projetado. Sem ela o mapa não diz onde é seguro, só onde é
+    # perigoso, e quem está na borda do desenho fica sem resposta.
+    cota_segura = (
+        float(cota_max_cm) * MARGEM_AREA_SEGURA
+        if cota_max_cm is not None and not pd.isna(cota_max_cm) else None
+    )
+
+    # Ordem FIXA, da maior área para a menor: o verde por baixo e o vermelho
+    # por cima. Como min < central < máx < segura por construção, não há risco
+    # de uma faixa cobrir a outra.
     niveis = [
-        ("maxima", "Pior caso", cota_max_cm, "#ffeb3b", "#fbc02d",
-         "limite superior do erro observado"),
-        ("projetada", "Projeção central", cota_projetada_cm, "#ff9800", "#e65100",
-         "estimativa do modelo"),
-        ("minima", "Alta confiança", cota_min_cm, "#f44336", "#b71c1c",
+        ("segura", "Seguro", cota_segura, "#4caf50", "#1b5e20",
+         "além do alcance projetado, com margem do erro do modelo"),
+        ("atencao", "Atenção", cota_max_cm, "#ffeb3b", "#fbc02d",
+         "pior caso dentro do erro observado"),
+        ("alerta", "Alerta", cota_projetada_cm, "#ff9800", "#e65100",
+         "projeção central do modelo"),
+        ("extremo", "Extremo alerta", cota_min_cm, "#f44336", "#b71c1c",
          "a água chega aqui mesmo no cenário otimista"),
     ]
+    niveis = [n for n in niveis
+              if n[2] is not None and not pd.isna(n[2]) and float(n[2]) > 0]
 
     saida = []
     for chave, rotulo, cota, preenche, borda, leitura in niveis:
-        if cota is None or pd.isna(cota) or float(cota) <= 0:
-            continue
         largura_m = min(
             float(cota) / 100.0 * METROS_POR_METRO_DE_COTA, LARGURA_MAXIMA_M
         )
@@ -1485,6 +1514,7 @@ def faixas_de_incerteza(
             "nivel": chave,
             "rotulo": rotulo,
             "leitura": leitura,
+            "eh_area_segura": chave == "segura",
             "cota_cm": float(cota),
             "largura_estimada_m": round(largura_m),
             "cor_preenchimento": preenche,
