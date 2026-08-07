@@ -1300,14 +1300,21 @@ def criar_schema_historico() -> None:
                 codigo_estacao TEXT,
                 grandeza       TEXT,          -- 'cota' | 'chuva' | 'vazao'
                 datahora       TEXT,          -- 'YYYY-MM-DD' (diário)
-                valor          REAL,
+                valor          REAL,          -- máximo do dia entre as séries
                 consistencia   INTEGER,       -- 1 bruto, 2 consistido
+                media_diaria   REAL,          -- as três séries que a ANA
+                leitura_07h    REAL,          -- devolve separadas, guardadas
+                leitura_17h    REAL,          -- para quem precisar de cada uma
                 PRIMARY KEY (codigo_estacao, grandeza, datahora)
             );
             CREATE INDEX IF NOT EXISTS ix_hist ON serie_historica
                 (codigo_estacao, grandeza, datahora);
             """
         )
+        colunas = {l[1] for l in con.execute("PRAGMA table_info(serie_historica)")}
+        for nova in ("media_diaria", "leitura_07h", "leitura_17h"):
+            if nova not in colunas:
+                con.execute(f"ALTER TABLE serie_historica ADD COLUMN {nova} REAL")
 
 
 def coletar_historico(
@@ -1327,14 +1334,34 @@ def coletar_historico(
     inicio = fim - timedelta(days=365 * anos_atras)
     fmt = "%d/%m/%Y"
 
+    # QUAIS ESTAÇÕES: as do SACE, não as da telemetria.
+    #
+    # Medido: nenhuma das ~500 estações telemétricas do banco tem série
+    # histórica — são pontos de monitoramento de usina (UHE/PCH/CGH), obras
+    # recentes sem registro longo. Quem tem década de dado são as
+    # fluviométricas tradicionais da Rede Hidrometeorológica Nacional, que são
+    # justamente as que o SACE acompanha e para as quais existe cota oficial.
+    #
+    # O código do SACE é o da ANA truncado: 8672000 (SACE) -> 86720000 (ANA).
+    # Confirmado em 9 de 12 estações testadas. Os códigos de 6 dígitos exigem
+    # preenchimento diferente, então tentamos as variantes.
     with conectar() as con:
         estacoes = con.execute(
             "SELECT DISTINCT codigo, nome FROM estacao "
-            "WHERE codigo IS NOT NULL AND codigo != '' AND fonte = 'ANA telemetria' "
-            "ORDER BY codigo"
+            "WHERE fonte = 'SACE/SGB' AND codigo IS NOT NULL AND codigo != '' "
+            "ORDER BY nome"
         ).fetchall()
-    if limite_estacoes:
-        estacoes = estacoes[:limite_estacoes]
+
+    def variantes(codigo: str) -> list[str]:
+        """Formatos possíveis do código na base histórica da ANA."""
+        base = str(codigo).strip()
+        candidatos = [base + "0", base.ljust(8, "0"), base.zfill(8), base]
+        vistos, saida = set(), []
+        for c in candidatos:
+            if c not in vistos and len(c) <= 8:
+                vistos.add(c)
+                saida.append(c)
+        return saida
 
     total, erros = 0, []
     for i, (codigo, nome) in enumerate(estacoes):
@@ -1344,24 +1371,43 @@ def coletar_historico(
             except Exception:
                 pass
         for grandeza in grandezas:
-            try:
-                df = serie_historica_ana(
-                    codigo, inicio.strftime(fmt), fim.strftime(fmt), grandeza
-                )
-            except Exception as exc:
-                erros.append(f"{codigo}/{grandeza}: {type(exc).__name__}")
+            df, codigo_ana = None, None
+            for tentativa in variantes(codigo):
+                try:
+                    candidato = serie_historica_ana(
+                        tentativa, inicio.strftime(fmt), fim.strftime(fmt), grandeza
+                    )
+                except Exception as exc:
+                    erros.append(f"{tentativa}/{grandeza}: {type(exc).__name__}")
+                    continue
+                if not candidato.empty:
+                    df, codigo_ana = candidato, tentativa
+                    break
+            if df is None or df.empty:
                 continue
-            if df.empty:
-                continue
+            # Acesso por NOME, não por posição: `serie_historica_ana` devolve as
+            # três séries da fonte em colunas separadas (média diária, 07 h e
+            # 17 h) além de `valor` e `consistencia`, e desempacotar por
+            # posição quebra a cada coluna nova.
             linhas = [
-                (codigo, grandeza, d.strftime("%Y-%m-%d"), float(v), int(c))
-                for d, v, c in df.itertuples(index=False)
+                (
+                    codigo_ana, grandeza,
+                    linha.datahora.strftime("%Y-%m-%d"),
+                    float(linha.valor),
+                    int(linha.consistencia),
+                    None if pd.isna(linha.media_diaria) else float(linha.media_diaria),
+                    None if pd.isna(linha.leitura_07h) else float(linha.leitura_07h),
+                    None if pd.isna(linha.leitura_17h) else float(linha.leitura_17h),
+                )
+                for linha in df.itertuples(index=False)
+                if pd.notna(linha.valor)
             ]
             with conectar() as con:
                 con.executemany(
                     "INSERT OR REPLACE INTO serie_historica "
-                    "(codigo_estacao, grandeza, datahora, valor, consistencia) "
-                    "VALUES (?,?,?,?,?)",
+                    "(codigo_estacao, grandeza, datahora, valor, consistencia, "
+                    " media_diaria, leitura_07h, leitura_17h) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
                     linhas,
                 )
             total += len(linhas)

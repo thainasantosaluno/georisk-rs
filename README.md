@@ -330,6 +330,22 @@ consistida com mais de 15 anos. Em Encantado, 5.693 dias entre 2010 e 2025 —
 python georisk_dados.py --historico --anos 15
 ```
 
+Traz **156.877 dias de 34 estações**, de setembro/2011 a março/2026.
+
+### Quais estações têm histórico — e por quê
+
+Nenhuma das ~500 estações telemétricas do banco tem série histórica: são pontos
+de monitoramento de usina (UHE/PCH/CGH), obras recentes sem registro longo.
+Testei 12 e todas voltaram vazias.
+
+Quem tem década de dado são as fluviométricas tradicionais da Rede
+Hidrometeorológica Nacional — que são justamente as que o SACE acompanha e para
+as quais existe cota oficial. O código do SACE é o da ANA truncado
+(`8672000` → `86720000`), e o coletor tenta as variantes de preenchimento.
+
+`catalogo_de_cheias()` monta a lista de eventos: em Encantado são **17 cheias
+acima da cota de inundação** desde 2011.
+
 ### O formato tem uma armadilha
 
 Para cada mês a ANA devolve **três séries**, distinguidas pela hora do
