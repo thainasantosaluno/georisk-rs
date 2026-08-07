@@ -407,11 +407,30 @@ Em 3 das 10 estações o método ganha (Encantado 0,489→0,549; Lajeado
 estações o ganho sobre os valores de literatura é de +0,002 — ruído. Os
 parâmetros seguem nos valores da literatura, que ao menos têm respaldo.
 
-**Leitura honesta.** A correlação linear com a subida diária não é o melhor
-juiz do método: o SCS-CN foi feito para estimar volume de escoamento de um
-evento, não para maximizar correlação ponto a ponto — e é justamente em evento
-que ele se sai bem (a razão de 44× acima). Mas o resultado impede afirmar que a
-transformação melhora a previsão em geral, e isso fica registrado.
+**O teste diário era injusto.** Duas objeções: dois postos de chuva para uma
+bacia de 26.000 km², e resolução diária para um rio que sobe em 12 h. Refeito
+com a série de 15 min e a chuva média de **14 postos**, em 12 estações do
+Taquari:
+
+| Método | r médio |
+|---|---|
+| Chuva bruta | 0,527 |
+| + SCS-CN | 0,540 |
+| + encharcamento | **0,543** |
+
+O método passa a **ganhar**: de −0,031 no teste diário para **+0,016**. Vence
+em 9 das 12 estações; perde em Bom Retiro do Sul, Porto Mariante e Taquari —
+as três mais a jusante, onde o nível é governado pela onda que vem de montante,
+não pela chuva sobre a bacia.
+
+**Leitura final.** A metodologia se sustenta, mas o ganho sobre a chuva bruta é
+modesto: cerca de 3 % na correlação. O que realmente separa cheia de não-cheia
+é a razão de 44× no volume efetivo — e é para isso que o SCS-CN foi feito,
+estimar volume de escoamento de evento, não maximizar correlação ponto a ponto.
+
+Nada disso justifica calibrar os limiares: o ganho do encharcamento sobre o CN
+fixo é de +0,002 nesta janela de 30 dias com um único evento. Com mais eventos
+no arquivo, o teste ganha poder e a conclusão pode mudar.
 
 ### O que isso permite — e o que não permite
 
