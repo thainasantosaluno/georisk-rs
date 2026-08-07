@@ -51,6 +51,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 import urllib3
@@ -1151,6 +1152,271 @@ def coletar_inmet() -> tuple[list[dict], list[str]]:
     return [], ["INMET: endpoints de leitura indisponíveis sem token (204/404)."]
 
 
+# -----------------------------------------------------------------------------
+# SÉRIE HISTÓRICA DA ANA — anos de dado diário, para calibrar e validar
+# -----------------------------------------------------------------------------
+# A telemetria só devolve os últimos dias e o SACE publica uma janela de 30. Com
+# isso o projeto tinha UM evento de cheia para treinar, e qualquer calibração
+# viraria decorar aquele caso.
+#
+# `HidroSerieHistorica` do mesmo serviço da ANA resolve: devolve a série DIÁRIA
+# consistida, com mais de 15 anos de cobertura. Verificado em Encantado —
+# 2010 a 2025 sem lacuna, e a cheia catastrófica de maio de 2024 aparece com
+# 2.314 cm em 02/05/2024, contra cota de inundação de 1.200 cm.
+#
+# É dado diário, não de 15 min. Então NÃO serve para o tempo de resposta (Tc),
+# que precisa de resolução sub-diária. Serve para o que depende de evento:
+# calibrar os limiares de encharcamento, aferir o CN, e montar um catálogo de
+# cheias históricas para validar o método fora do período coletado.
+#
+# FORMATO DA FONTE: cada registro é um MÊS, com os dias em colunas separadas
+# (`Cota01`..`Cota31`, `Chuva01`..`Chuva31`). É preciso desdobrar.
+#
+# CONSISTÊNCIA: a ANA devolve o mesmo dia duas vezes quando há versão bruta
+# (NivelConsistencia=1) e consistida (=2). Ficamos com a consistida, que passou
+# por crítica técnica.
+
+URL_SERIE_HISTORICA = ANA_BASE + "HidroSerieHistorica"
+
+TIPO_HISTORICO = {"cota": (1, "Cota"), "chuva": (2, "Chuva"), "vazao": (3, "Vazao")}
+
+
+def serie_historica_ana(
+    codigo_estacao: str,
+    data_inicio: str,
+    data_fim: str,
+    grandeza: str = "cota",
+) -> pd.DataFrame:
+    """Série DIÁRIA histórica de uma estação da ANA.
+
+    Datas em `dd/mm/aaaa`. Devolve colunas `datahora`, `valor`, `consistencia`.
+    Quando o mesmo dia vem em versão bruta e consistida, mantém a consistida.
+    """
+    if grandeza not in TIPO_HISTORICO:
+        raise ValueError(f"grandeza deve ser uma de {list(TIPO_HISTORICO)}")
+    tipo, prefixo = TIPO_HISTORICO[grandeza]
+
+    resposta = _sessao().get(
+        URL_SERIE_HISTORICA,
+        params={
+            "codEstacao": str(codigo_estacao),
+            "dataInicio": data_inicio,
+            "dataFim": data_fim,
+            "tipoDados": str(tipo),
+            "nivelConsistencia": "",
+        },
+        timeout=300,
+    )
+    resposta.raise_for_status()
+
+    try:
+        raiz = ET.fromstring(resposta.text)
+    except ET.ParseError:
+        return pd.DataFrame(columns=["datahora", "valor", "consistencia"])
+
+    # ESTRUTURA DA FONTE, decifrada na marra: para cada mês vêm ATÉ TRÊS
+    # registros, distinguidos pela hora do `DataHora` e pelo campo
+    # `MediaDiaria`:
+    #
+    #     00:00  MediaDiaria=1  -> série da média diária
+    #     07:00  MediaDiaria=0  -> leitura das 7 h
+    #     17:00  MediaDiaria=0  -> leitura das 17 h
+    #
+    # Empilhar as três como se fossem a mesma série produz três valores por dia
+    # com significados diferentes — foi o erro da primeira versão.
+    #
+    # E a escolha importa: no pico da cheia de maio/2024 em Encantado, os
+    # 2.314 cm de 02/05 aparecem SÓ na leitura das 17 h; a série de média
+    # diária nem tem valor para aquele dia. Usar apenas a média perderia o
+    # pico, que é justamente o que interessa em análise de cheia. Por isso
+    # devolvemos as três colunas e o máximo do dia.
+    registros: dict[str, dict] = {}
+    for registro in raiz.iter():
+        if registro.tag.split("}")[-1] != "SerieHistorica":
+            continue
+        campos = {c.tag.split("}")[-1]: c.text for c in registro}
+        base = pd.to_datetime(campos.get("DataHora"), errors="coerce")
+        if pd.isna(base):
+            continue
+
+        media_diaria = (campos.get("MediaDiaria") or "0").strip() == "1"
+        if media_diaria:
+            serie_nome = "media_diaria"
+        elif base.hour == 7:
+            serie_nome = "leitura_07h"
+        elif base.hour == 17:
+            serie_nome = "leitura_17h"
+        else:
+            serie_nome = f"leitura_{base.hour:02d}h"
+
+        consistencia = int(_float(campos.get("NivelConsistencia")) or 1)
+
+        for dia in range(1, 32):
+            valor = _float(campos.get(f"{prefixo}{dia:02d}"))
+            if valor is None:
+                continue
+            try:
+                quando = base.normalize() + timedelta(days=dia - 1)
+            except (ValueError, OverflowError):
+                continue
+            if quando.month != base.month:
+                continue  # mês curto: 30 de fevereiro não existe
+
+            chave = quando.strftime("%Y-%m-%d")
+            linha = registros.setdefault(
+                chave, {"datahora": quando, "consistencia": consistencia}
+            )
+            # Consistida (2) prevalece sobre bruta (1) para a mesma coluna.
+            if serie_nome not in linha or consistencia >= linha["consistencia"]:
+                linha[serie_nome] = valor
+                linha["consistencia"] = max(linha["consistencia"], consistencia)
+
+    if not registros:
+        return pd.DataFrame(
+            columns=["datahora", "media_diaria", "leitura_07h", "leitura_17h",
+                     "valor", "consistencia"]
+        )
+
+    df = pd.DataFrame(list(registros.values())).sort_values("datahora")
+    for coluna in ("media_diaria", "leitura_07h", "leitura_17h"):
+        if coluna not in df.columns:
+            df[coluna] = np.nan
+
+    # `valor` = máximo do dia entre as séries disponíveis. É o que representa a
+    # cheia; a média diária fica na coluna própria para quem precisar dela.
+    df["valor"] = df[["media_diaria", "leitura_07h", "leitura_17h"]].max(axis=1)
+
+    return df[
+        ["datahora", "valor", "media_diaria", "leitura_07h", "leitura_17h",
+         "consistencia"]
+    ].reset_index(drop=True)
+
+
+def criar_schema_historico() -> None:
+    with conectar() as con:
+        con.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS serie_historica (
+                codigo_estacao TEXT,
+                grandeza       TEXT,          -- 'cota' | 'chuva' | 'vazao'
+                datahora       TEXT,          -- 'YYYY-MM-DD' (diário)
+                valor          REAL,
+                consistencia   INTEGER,       -- 1 bruto, 2 consistido
+                PRIMARY KEY (codigo_estacao, grandeza, datahora)
+            );
+            CREATE INDEX IF NOT EXISTS ix_hist ON serie_historica
+                (codigo_estacao, grandeza, datahora);
+            """
+        )
+
+
+def coletar_historico(
+    anos_atras: int = 15,
+    grandezas: tuple[str, ...] = ("cota", "chuva"),
+    limite_estacoes: int | None = None,
+    progresso=None,
+) -> dict:
+    """Baixa a série histórica diária das estações do RS já cadastradas.
+
+    Roda uma vez e fica no banco: é dado consolidado, não muda. Serve de base
+    para calibração e para validar o método em eventos fora do período que a
+    coleta corrente alcança.
+    """
+    criar_schema_historico()
+    fim = datetime.now()
+    inicio = fim - timedelta(days=365 * anos_atras)
+    fmt = "%d/%m/%Y"
+
+    with conectar() as con:
+        estacoes = con.execute(
+            "SELECT DISTINCT codigo, nome FROM estacao "
+            "WHERE codigo IS NOT NULL AND codigo != '' AND fonte = 'ANA telemetria' "
+            "ORDER BY codigo"
+        ).fetchall()
+    if limite_estacoes:
+        estacoes = estacoes[:limite_estacoes]
+
+    total, erros = 0, []
+    for i, (codigo, nome) in enumerate(estacoes):
+        if progresso:
+            try:
+                progresso(i / max(len(estacoes), 1), f"{nome} ({codigo})…")
+            except Exception:
+                pass
+        for grandeza in grandezas:
+            try:
+                df = serie_historica_ana(
+                    codigo, inicio.strftime(fmt), fim.strftime(fmt), grandeza
+                )
+            except Exception as exc:
+                erros.append(f"{codigo}/{grandeza}: {type(exc).__name__}")
+                continue
+            if df.empty:
+                continue
+            linhas = [
+                (codigo, grandeza, d.strftime("%Y-%m-%d"), float(v), int(c))
+                for d, v, c in df.itertuples(index=False)
+            ]
+            with conectar() as con:
+                con.executemany(
+                    "INSERT OR REPLACE INTO serie_historica "
+                    "(codigo_estacao, grandeza, datahora, valor, consistencia) "
+                    "VALUES (?,?,?,?,?)",
+                    linhas,
+                )
+            total += len(linhas)
+
+    return {"registros": total, "estacoes": len(estacoes), "erros": erros[:20]}
+
+
+def carregar_historico(
+    codigo_estacao: str, grandeza: str = "cota"
+) -> pd.DataFrame:
+    criar_schema_historico()
+    with conectar() as con:
+        df = pd.read_sql_query(
+            "SELECT datahora, valor FROM serie_historica "
+            "WHERE codigo_estacao=? AND grandeza=? ORDER BY datahora",
+            con, params=(codigo_estacao, grandeza),
+        )
+    if not df.empty:
+        df["datahora"] = pd.to_datetime(df["datahora"], errors="coerce")
+    return df
+
+
+def catalogo_de_cheias(
+    codigo_estacao: str, cota_inundacao_cm: float, folga_dias: int = 5
+) -> pd.DataFrame:
+    """Eventos históricos em que a estação passou da cota de inundação.
+
+    É a matéria-prima para validar o método fora do período coletado: cada
+    linha é uma cheia real, com data do pico e nível atingido.
+    """
+    serie = carregar_historico(codigo_estacao, "cota")
+    if serie.empty:
+        return serie
+
+    acima = serie[serie["valor"] >= cota_inundacao_cm].copy()
+    if acima.empty:
+        return acima
+
+    # Agrupa dias consecutivos num único evento.
+    acima["_gap"] = acima["datahora"].diff().dt.days.fillna(999)
+    acima["_evento"] = (acima["_gap"] > folga_dias).cumsum()
+
+    return (
+        acima.groupby("_evento")
+        .agg(
+            inicio=("datahora", "min"),
+            fim=("datahora", "max"),
+            pico_cm=("valor", "max"),
+            dias=("valor", "size"),
+        )
+        .reset_index(drop=True)
+        .sort_values("pico_cm", ascending=False)
+    )
+
+
 def exportar_series_mensais(pasta: str | Path = "dados/serie") -> list[Path]:
     """Arquiva a série de 15 min em CSV mensal comprimido, versionado no Git.
 
@@ -1299,9 +1565,22 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
     ap = argparse.ArgumentParser(description="Coletor GeoRisk-RS (dados reais).")
     ap.add_argument("--sem-ana", action="store_true", help="coletar só o SACE (mais rápido)")
     ap.add_argument("--exportar", action="store_true", help="gerar dados/ em CSV+JSON")
+    ap.add_argument("--historico", action="store_true",
+                    help="baixar a serie historica diaria da ANA (anos de dado)")
+    ap.add_argument("--anos", type=int, default=15, help="quantos anos de historico")
     ap.add_argument("--importar-arquivo", action="store_true",
                     help="recarregar dados/serie/*.csv.gz para o banco (maquina nova)")
     args = ap.parse_args()
+
+    if args.historico:
+        r = coletar_historico(
+            anos_atras=args.anos,
+            progresso=lambda f, m: print(f"[{f:5.0%}] {m}"),
+        )
+        print(f"{r['registros']:,} registros históricos de {r['estacoes']} estações")
+        if r["erros"]:
+            print(f"{len(r['erros'])} avisos:", r["erros"][:5])
+        raise SystemExit(0)
 
     if args.importar_arquivo:
         # Ação isolada: reconstruir o banco a partir do arquivo versionado,

@@ -308,6 +308,50 @@ No pico de 22/07, sobre os 26.315 km² do Taquari-Antas:
 O balanço traz `volume_precipitado_m3`, `volume_escoado_m3`,
 `volume_infiltrado_m3` e `coeficiente_escoamento`.
 
+## Série histórica — anos de dado para calibrar e validar
+
+A telemetria devolve dias e o SACE publica 30. Com isso o projeto tinha **um**
+evento de cheia para trabalhar, e qualquer calibração viraria decorar aquele
+caso.
+
+`HidroSerieHistorica`, do mesmo serviço da ANA, resolve: série **diária**
+consistida com mais de 15 anos. Em Encantado, 5.693 dias entre 2010 e 2025 —
+97 % de cobertura — e **11 anos com pelo menos uma cheia**:
+
+| Data | Pico |
+|---|---|
+| 02/05/2024 | **2.314 cm** |
+| 04/09/2023 | 2.227 cm |
+| 18/11/2023 | 2.061 cm |
+| 08/07/2020 | 2.022 cm |
+| 21/07/2011 | 1.902 cm |
+
+```bash
+python georisk_dados.py --historico --anos 15
+```
+
+### O formato tem uma armadilha
+
+Para cada mês a ANA devolve **três séries**, distinguidas pela hora do
+`DataHora` e pelo campo `MediaDiaria`: média diária às 00:00, leitura das 07 h e
+leitura das 17 h. Empilhá-las como se fossem a mesma coisa dá três valores por
+dia com significados diferentes.
+
+E a escolha entre elas muda o resultado: o pico de 2.314 cm de 02/05/2024
+aparece **só na leitura das 17 h** — a série de média diária nem tem valor para
+aquele dia. Usar apenas a média perderia o pico, que é exatamente o que
+interessa em análise de cheia. Por isso `serie_historica_ana()` devolve as três
+colunas separadas e `valor` = máximo do dia.
+
+### O que isso permite — e o que não permite
+
+**Permite** calibrar os limiares de encharcamento contra dezenas de cheias
+reais, aferir o CN e validar o método fora do período coletado.
+
+**Não permite** calibrar o tempo de resposta (Tc): é dado diário, e Tc de 1 a
+17 h exige resolução sub-diária. Para isso continua valendo o arquivo de 15 min
+que a coleta acumula.
+
 ## Geologia, estrutura e relevo
 
 Três camadas do BDIA/IBGE caracterizam cada bacia, com papéis deliberadamente
