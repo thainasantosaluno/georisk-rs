@@ -137,12 +137,10 @@ with st.sidebar:
         st.warning("Banco vazio. Rode uma coleta.")
 
     st.caption(
-        f"🔄 Atualiza sozinho a cada **{INTERVALO_ATUALIZACAO_MIN} min**, "
+        f"🔄 Atualização **automática** a cada **{INTERVALO_ATUALIZACAO_MIN} min**, "
         "com SACE + telemetria da ANA."
     )
 
-    if st.button("⬇️ Atualizar agora", use_container_width=True, type="primary"):
-        atualizar(INCLUIR_ANA)
 
     st.divider()
     st.caption(
@@ -290,10 +288,23 @@ def exibir_boletim_modal(row: pd.Series) -> None:
         f"**Código:** `{ou(row.get('codigo'))}`"
     )
 
+    # Quando o valor atual falta mas a série tem histórico, mostra a última
+    # leitura conhecida e a idade dela. "Sem dado" ao lado de um gráfico cheio
+    # de pontos confundia: parecia ausência de medição, quando na verdade é
+    # estação que parou de transmitir.
+    nivel_txt, nota_nivel = gm.texto_com_idade(
+        row.get("nivel_cm"), row["id"], "cota", " cm")
+    chuva_txt, nota_chuva = gm.texto_com_idade(
+        row.get("chuva_24h"), row["id"], "chuva", " mm", 1)
+
     k1, k2, k3 = st.columns(3)
-    k1.metric("Nível atual", texto(row.get("nivel_cm"), " cm"))
-    k2.metric("Chuva 24h", texto(row.get("chuva_24h"), " mm", 1))
+    k1.metric("Nível", nivel_txt, help=nota_nivel)
+    k2.metric("Chuva 24h", chuva_txt, help=nota_chuva)
     k3.metric("Vazão", texto(row.get("vazao_m3s"), " m³/s", 1))
+
+    nota = nota_nivel or nota_chuva
+    if nota:
+        st.warning(f"⚠️ Estação sem transmissão: {nota}.", icon="⚠️")
 
     # pd.notna: vindo do banco, campo vazio chega como NaN (que é "verdadeiro").
     if pd.notna(row.get("observacao")):
@@ -303,7 +314,7 @@ def exibir_boletim_modal(row: pd.Series) -> None:
     if figura is None:
         st.info("Ainda sem série histórica no banco para esta estação.")
     else:
-        st.plotly_chart(figura, use_container_width=True)
+        st.plotly_chart(figura, width='stretch')
 
     serie_cota = carregar_serie(row["id"], "cota")
     serie_chuva = carregar_serie(row["id"], "chuva")
@@ -316,7 +327,7 @@ def exibir_boletim_modal(row: pd.Series) -> None:
                 if not serie_cota.empty else b"sem dado\n"
             ),
             file_name=f"cota_{row['id']}.csv", mime="text/csv",
-            use_container_width=True, disabled=serie_cota.empty,
+            width='stretch', disabled=serie_cota.empty,
         )
     with c2:
         st.download_button(
@@ -326,7 +337,7 @@ def exibir_boletim_modal(row: pd.Series) -> None:
                 if not serie_chuva.empty else b"sem dado\n"
             ),
             file_name=f"chuva_{row['id']}.csv", mime="text/csv",
-            use_container_width=True, disabled=serie_chuva.empty,
+            width='stretch', disabled=serie_chuva.empty,
         )
     with c3:
         st.info(f"Vazão medida: **{texto(row.get('vazao_m3s'), ' m³/s', 1)}**")
@@ -420,7 +431,7 @@ with tab_mapa:
                 "cota_alerta_cm": st.column_config.NumberColumn("Alerta", format="%d"),
                 "cota_inundacao_cm": st.column_config.NumberColumn("Inundação", format="%d"),
             },
-            hide_index=True, use_container_width=True, height=250,
+            hide_index=True, width='stretch', height=250,
         )
 
         st.subheader("🌧️ Acumulados de Chuva")
@@ -434,7 +445,7 @@ with tab_mapa:
                 "chuva_24h": st.column_config.NumberColumn("24h", format="%.1f"),
                 "chuva_72h": st.column_config.NumberColumn("72h", format="%.1f"),
             },
-            hide_index=True, use_container_width=True, height=230,
+            hide_index=True, width='stretch', height=230,
         )
 
 with tab_manchas:
@@ -484,12 +495,24 @@ with tab_manchas:
         ver_eixo_rio = st.checkbox("🟢 Eixo do Rio (esquemático)", value=False)
 
         st.markdown("---")
+        # LIMIARES PRIMEIRO, de propósito.
+        #
+        # O envelope roda o modelo hidrológico por estação para obter a
+        # projeção — 30 s contra 5 s dos limiares. E como o Streamlit executa
+        # o script inteiro a cada interação, essa espera bloqueia TODAS as
+        # abas, inclusive a de Previsão Hidrológica, que aparecia em branco
+        # enquanto o mapa calculava.
+        #
+        # Os limiares usam as cotas oficiais, que são fixas e já estão no
+        # banco: nada a calcular. O envelope fica a um clique, para quem
+        # quiser a projeção e aceitar a espera.
         modo_faixa = st.radio(
             "Faixas sobre o rio real:",
-            ["Envelope da projeção", "Limiares fixos (atenção/alerta/inundação)"],
-            help="O envelope mostra a mancha da COTA PROJETADA com as cores "
-                 "marcando a incerteza do modelo. Os limiares fixos mostram as "
-                 "três cotas oficiais, independentes da projeção.",
+            ["Limiares fixos (atenção/alerta/inundação)", "Envelope da projeção"],
+            help="Limiares fixos: as três cotas oficiais, imediato. "
+                 "Envelope da projeção: a mancha da cota projetada com as cores "
+                 "marcando a incerteza do modelo — mais informativo, porém leva "
+                 "cerca de 30 s para calcular.",
         )
         ver_faixas = st.checkbox(
             "🌊 Exibir faixas (onde não há mancha oficial)", value=True,
@@ -714,7 +737,7 @@ with tab_hidro:
             _projecao_series(resultado),
             resultado["tc_horas"],
         )
-        st.plotly_chart(figura, use_container_width=True, key=f"hidro_{estacao_id}")
+        st.plotly_chart(figura, width='stretch', key=f"hidro_{estacao_id}")
 
         # --- Balanço volumétrico e detalhamento
         col_bal, col_proj = st.columns(2)
@@ -743,7 +766,7 @@ with tab_hidro:
                         ],
                     }
                 ),
-                hide_index=True, use_container_width=True,
+                hide_index=True, width='stretch',
             )
             st.markdown("##### Precipitação acumulada")
             st.dataframe(
@@ -751,7 +774,7 @@ with tab_hidro:
                     list(resultado["precipitacao_acumulada_mm"].items()),
                     columns=["Janela", "mm"],
                 ),
-                hide_index=True, use_container_width=True,
+                hide_index=True, width='stretch',
             )
 
         with col_proj:
@@ -772,7 +795,7 @@ with tab_hidro:
                         ),
                         "util": "Ganho sobre persistência",
                     },
-                    hide_index=True, use_container_width=True,
+                    hide_index=True, width='stretch',
                 )
             st.markdown("##### 🚦 Situação das cotas oficiais")
             # Repetir "não atingida" três vezes não informa nada. O que o
@@ -822,7 +845,7 @@ with tab_hidro:
                         format="%d", help="Quanto o rio ainda precisa subir."
                     ),
                 },
-                hide_index=True, use_container_width=True,
+                hide_index=True, width='stretch',
             )
             if atual is not None and pico is not None:
                 st.caption(

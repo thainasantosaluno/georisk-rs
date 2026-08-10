@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -190,10 +191,29 @@ def _float_ptbr(txt) -> float | None:
 # -----------------------------------------------------------------------------
 # BANCO (SQLite — o mesmo georisk_rs.db do projeto)
 # -----------------------------------------------------------------------------
-def conectar() -> sqlite3.Connection:
+@contextmanager
+def conectar():
+    """Conexão que realmente FECHA ao sair do bloco.
+
+    `with sqlite3.connect(...) as con` NÃO fecha a conexão — só faz commit ou
+    rollback da transação. Como todo o projeto usa esse padrão, cada chamada
+    deixava um descritor aberto: medido, 262 conexões vazadas numa única
+    execução. Com o painel aberto por horas, atualizando a cada 15 min, isso
+    chega ao limite de descritores do processo.
+
+    Este gerenciador mantém o commit automático do comportamento anterior e
+    acrescenta o `close()` que faltava.
+    """
     con = sqlite3.connect(CAMINHO_BANCO, timeout=30, check_same_thread=False)
-    con.execute("PRAGMA journal_mode=WAL")
-    return con
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 
 def criar_schema() -> None:
@@ -269,12 +289,46 @@ def criar_schema() -> None:
 # -----------------------------------------------------------------------------
 # COLETA 1 — SACE / SGB  (nível + COTAS OFICIAIS + chuva + série 15 min)
 # -----------------------------------------------------------------------------
+# O SGB trocou a forma de desenhar as estações em agosto de 2026: saiu
+# `L.marker([lat, lon], {icon: NomeDoStatus})` e entrou
+# `L.circleMarker([lat, lon], {radius:…, fillColor: "#00FF33", …})`.
+#
+# A situação deixou de vir no NOME do ícone e passou a vir na COR em
+# hexadecimal. O coletor ficou três dias devolvendo zero estação sem acusar
+# erro — a página respondia normalmente, só não casava mais com o padrão.
+#
+# As duas formas ficam aceitas: se o SGB reverter, continua funcionando.
 RE_MARCADOR = re.compile(
+    r"relatorio\.php\?apenas_grafico=sim&bacia=(\w+)&pm=(\d*)&s=(\d*)&sr=(\d*)"
+    r".*?L\.circleMarker\(\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]"
+    r".*?fillColor:\s*\"(#[0-9A-Fa-f]{6})\""
+    r".*?bindTooltip\(\s*\"([^\"]*)\"",
+    re.S,
+)
+
+RE_MARCADOR_ANTIGO = re.compile(
     r"relatorio\.php\?apenas_grafico=sim&bacia=(\w+)&pm=(\d*)&s=(\d*)&sr=(\d*)"
     r".*?L\.marker\(\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]\s*,\s*\{icon:\s*(\w+)\}"
     r".*?bindTooltip\(\s*\"([^\"]*)\"",
     re.S,
 )
+
+# Cor do marcador -> situação. Conferido contra o texto "Situação:" que o
+# `relatorio.php` publica para as mesmas estações.
+COR_PARA_SITUACAO = {
+    "#00ff33": ("Normal", "green"),
+    "#00cc00": ("Normal", "green"),
+    "#ffff00": ("Cota de Atenção", "gold"),
+    "#ffff33": ("Cota de Atenção", "gold"),
+    "#ff9900": ("Cota de Alerta", "orange"),
+    "#ff9933": ("Cota de Alerta", "orange"),
+    "#ff0033": ("Cota de Inundação", "red"),
+    "#ff3333": ("Cota de Inundação", "red"),
+    "#cc0000": ("Cota de Inundação Severa", "purple"),
+    "#c4c4c4": ("Sem transmissão", "gray"),
+    "#cccccc": ("Sem transmissão", "gray"),
+    "#999999": ("Sem transmissão", "gray"),
+}
 RE_PONTOS_CHUVA = re.compile(r"const\s+pontosChuva\s*=\s*(\[.*?\]);", re.S)
 
 RE_NIVEL = re.compile(r"<h2[^>]*>\s*([\d.,]+)\s*Cota\s*\(cm\)\s*</h2>", re.I)
@@ -328,10 +382,23 @@ def _mapa_sace(bacia: str) -> list[dict]:
         except (ValueError, IndexError, TypeError):
             chuva_por_ponto = {}
 
+    achados = [(*g[:6], g[6], g[7], "cor") for g in RE_MARCADOR.findall(html)]
+    if not achados:
+        # Formato antigo, com ícone nomeado.
+        achados = [(*g[:6], g[6], g[7], "icone")
+                   for g in RE_MARCADOR_ANTIGO.findall(html)]
+
     estacoes = []
-    for bac, pm, s, sr, lat, lon, icone, tooltip in RE_MARCADOR.findall(html):
+    for bac, pm, s, sr, lat, lon, marca, tooltip, tipo_marca in achados:
         codigo, nome = _limpar_nome(tooltip)
-        situacao, cor = ICONE_PARA_SITUACAO.get(icone, ("Sem classificação", "gray"))
+        if tipo_marca == "cor":
+            situacao, cor = COR_PARA_SITUACAO.get(
+                marca.lower(), ("Sem classificação", "gray")
+            )
+        else:
+            situacao, cor = ICONE_PARA_SITUACAO.get(
+                marca, ("Sem classificação", "gray")
+            )
         estacoes.append(
             {
                 # A chave usa a bacia REAL do relatório (a página 'guaiba'

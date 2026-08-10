@@ -59,6 +59,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -173,10 +174,29 @@ def _sessao() -> requests.Session:
     return s
 
 
-def _conectar(db_path: str = CAMINHO_BANCO_PADRAO) -> sqlite3.Connection:
-    con = sqlite3.connect(db_path, timeout=60)
-    con.execute("PRAGMA journal_mode=WAL")
-    return con
+@contextmanager
+def _conectar(db_path: str = CAMINHO_BANCO_PADRAO):
+    """Conexão que fecha ao sair do bloco — ver `georisk_dados.conectar`.
+
+    O `with sqlite3.connect(...)` faz commit mas não fecha, e o projeto abre
+    conexão em quase toda função de leitura.
+    """
+    if not Path(db_path).exists():
+        raise FileNotFoundError(
+            f"Banco não encontrado em {db_path}. Rode a coleta primeiro: "
+            "`python georisk_dados.py --exportar`."
+        )
+    con = sqlite3.connect(db_path, timeout=30)
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 
 
 def criar_schema_geo(db_path: str = CAMINHO_BANCO_PADRAO) -> None:

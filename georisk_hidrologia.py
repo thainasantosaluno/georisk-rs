@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -169,13 +170,29 @@ class ChuvaEfetiva:
 # -----------------------------------------------------------------------------
 # 1. LEITURA DO BANCO
 # -----------------------------------------------------------------------------
-def _conectar(db_path: str) -> sqlite3.Connection:
+@contextmanager
+def _conectar(db_path: str = CAMINHO_BANCO_PADRAO):
+    """Conexão que fecha ao sair do bloco — ver `georisk_dados.conectar`.
+
+    O `with sqlite3.connect(...)` faz commit mas não fecha, e o projeto abre
+    conexão em quase toda função de leitura.
+    """
     if not Path(db_path).exists():
         raise FileNotFoundError(
             f"Banco não encontrado em {db_path}. Rode a coleta primeiro: "
             "`python georisk_dados.py --exportar`."
         )
-    return sqlite3.connect(db_path, timeout=30)
+    con = sqlite3.connect(db_path, timeout=30)
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 
 
 def carregar_cadastro(estacao_id: str, db_path: str = CAMINHO_BANCO_PADRAO) -> dict:

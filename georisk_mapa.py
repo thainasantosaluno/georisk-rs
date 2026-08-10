@@ -34,6 +34,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import georisk_dados as gd
 import georisk_geo as gg
 import georisk_hidrologia as gh
 
@@ -354,3 +355,54 @@ def desenhar_manchas_oficiais(mapa, estacoes, opacidade: float,
     return resumo
 
 
+
+
+# -----------------------------------------------------------------------------
+# LEITURA MAIS RECENTE CONHECIDA
+# -----------------------------------------------------------------------------
+def ultima_leitura(id_estacao: str, grandeza: str = "cota") -> dict | None:
+    """Último valor que a estação chegou a registrar, com a idade dele.
+
+    Existe por causa de uma incoerência que aparecia no boletim: estação que
+    parou de transmitir tem `nivel_cm` NULL na tabela `estacao` — o que está
+    certo, não há leitura ATUAL — mas o gráfico logo abaixo mostrava a série
+    inteira, com centenas de pontos. O painel escrevia "Sem dado" ao lado de um
+    gráfico cheio de dados, sugerindo que não existia medição nenhuma.
+
+    A informação correta não é "sem dado": é "a última leitura foi X, há N
+    horas". Isso muda a decisão — três dias sem transmitir é problema de
+    sensor, não ausência de histórico.
+    """
+    serie = gd.carregar_serie(id_estacao, grandeza)
+    if serie.empty:
+        return None
+    ultima = serie.iloc[-1]
+    quando = pd.to_datetime(ultima["datahora"])
+    idade_h = (pd.Timestamp.now() - quando).total_seconds() / 3600
+    return {
+        "valor": float(ultima["valor"]),
+        "quando": quando,
+        "horas_atras": round(idade_h, 1),
+        "unidade": ultima.get("unidade") or ("cm" if grandeza == "cota" else "mm"),
+    }
+
+
+def texto_com_idade(valor_atual, id_estacao: str, grandeza: str = "cota",
+                    sufixo: str = "", casas: int = 0) -> tuple[str, str | None]:
+    """Valor para exibir e, quando for leitura velha, a explicação da idade."""
+    if valor_atual is not None and not pd.isna(valor_atual):
+        return f"{float(valor_atual):.{casas}f}{sufixo}", None
+
+    ultima = ultima_leitura(id_estacao, grandeza)
+    if ultima is None:
+        return "Sem dado", None
+
+    if ultima["horas_atras"] < 48:
+        idade = f"há {ultima['horas_atras']:.0f} h"
+    else:
+        idade = f"há {ultima['horas_atras'] / 24:.0f} dias"
+    return (
+        f"{ultima['valor']:.{casas}f}{sufixo}",
+        f"última leitura em {ultima['quando']:%d/%m %H:%M} ({idade}) — "
+        "a estação parou de transmitir",
+    )

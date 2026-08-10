@@ -121,12 +121,10 @@ with st.sidebar:
         st.warning("Nenhuma coleta ainda. Clique em **Atualizar agora**.")
 
     st.caption(
-        f"🔄 Atualiza sozinho a cada **{INTERVALO_ATUALIZACAO_MIN} min**, "
+        f"🔄 Atualização **automática** a cada **{INTERVALO_ATUALIZACAO_MIN} min**, "
         "com SACE + telemetria da ANA."
     )
 
-    if st.button("⬇️ Atualizar agora", use_container_width=True, type="primary"):
-        executar_coleta(INCLUIR_ANA)
 
     st.divider()
     st.caption(
@@ -306,12 +304,17 @@ def abrir_dialog_boletim(linha: pd.Series) -> None:
         f"&nbsp;|&nbsp; **Rio:** {_ou(linha.get('rio'), 'Não informado')}"
     )
 
+    nivel_txt, nota_nivel = gm.texto_com_idade(
+        linha.get("nivel_cm"), linha["id"], "cota", " cm")
+
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Nível atual", _mostrar(linha.get("nivel_cm"), " cm"))
+    c1.metric("Nível", nivel_txt, help=nota_nivel)
     c2.metric("Situação", _ou(linha.get("situacao")))
     c3.metric("Chuva 24h", _mostrar(linha.get("chuva_24h"), " mm", 1))
     c4.metric("Vazão", _mostrar(linha.get("vazao_m3s"), " m³/s", 1))
     st.caption(f"Medição da fonte em: {_ou(linha.get('medido_em'), 'sem registro')}")
+    if nota_nivel:
+        st.warning(f"⚠️ Estação sem transmissão: {nota_nivel}.", icon="⚠️")
 
     # pd.notna: vindo do banco, campo vazio chega como NaN (que é "verdadeiro").
     if pd.notna(linha.get("observacao")):
@@ -328,7 +331,7 @@ def abrir_dialog_boletim(linha: pd.Series) -> None:
             "modo completo se necessário."
         )
     else:
-        st.plotly_chart(figura, use_container_width=True)
+        st.plotly_chart(figura, width='stretch')
 
     # ---- Nowcast: extrapolação da chuva REAL recente, não previsão de tempo
     st.markdown("#### 🌧️ Nowcast de chuva")
@@ -356,12 +359,12 @@ def abrir_dialog_boletim(linha: pd.Series) -> None:
     if not serie_cota.empty:
         d1.download_button(
             "📥 Série de cota (CSV)", serie_cota.to_csv(index=False).encode("utf-8"),
-            file_name=f"cota_{linha['id']}.csv", mime="text/csv", use_container_width=True,
+            file_name=f"cota_{linha['id']}.csv", mime="text/csv", width='stretch',
         )
     if not serie_chuva.empty:
         d2.download_button(
             "📥 Série de chuva (CSV)", serie_chuva.to_csv(index=False).encode("utf-8"),
-            file_name=f"chuva_{linha['id']}.csv", mime="text/csv", use_container_width=True,
+            file_name=f"chuva_{linha['id']}.csv", mime="text/csv", width='stretch',
         )
 
     if pd.notna(linha.get("url_origem")):
@@ -456,7 +459,7 @@ with tab1:
             "cota_inundacao_cm": st.column_config.NumberColumn("Inundação", format="%d"),
             "situacao": "Situação", "medido_em": "Medido em", "fonte": "Fonte",
         },
-        hide_index=True, use_container_width=True, height=300,
+        hide_index=True, width='stretch', height=300,
     )
 
 with tab2:

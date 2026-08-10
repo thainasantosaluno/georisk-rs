@@ -537,6 +537,34 @@ a interpretação fica com quem tem referência da área.
 | Rio Uruguai | 74,8 | média | 0,129 km/km² |
 | Guaíba | 74,1 | alta | 0,154 km/km² |
 
+## Robustez
+
+O projeto roda sem nenhum aviso: `pyflakes` zerado nos seis módulos, nenhum
+warning de runtime, nenhuma depreciação de biblioteca, e os dois painéis sobem
+sem traceback.
+
+Três correções que valem registro, porque nenhuma delas dava erro visível:
+
+**A fonte mudou e o coletor calou.** Em agosto de 2026 o SGB trocou o desenho
+das estações de `L.marker([lat, lon], {icon: NomeDoStatus})` para
+`L.circleMarker([lat, lon], {fillColor: "#00FF33", …})` — a situação saiu do
+nome do ícone e foi para a cor. O coletor passou três dias devolvendo zero
+estação do SACE e registrando *0 erros*, porque a página respondia
+normalmente, só não casava mais com o padrão. As duas formas agora são
+aceitas. O aviso de "fontes fora de sincronia" no painel foi o que denunciou.
+
+**262 conexões de banco vazadas por execução.** `with sqlite3.connect(...)`
+faz commit mas **não fecha** a conexão, e o projeto usava esse padrão em 38
+lugares. Com o painel aberto por horas atualizando a cada 15 min, chegaria ao
+limite de descritores do processo. `conectar()` virou gerenciador de contexto
+que fecha de verdade.
+
+**"Sem dado" ao lado de um gráfico cheio de dados.** Estação que parou de
+transmitir tem `nivel_cm` nulo — o que está certo, não há leitura atual — mas o
+boletim escrevia "Sem dado" logo acima da série com centenas de pontos. Agora
+mostra a última leitura conhecida e há quanto tempo ela foi: três dias sem
+transmitir é problema de sensor, não ausência de histórico.
+
 ## Aviso
 
 O traçado esquemático que sobrou como opção — senos e cossenos ao redor da
