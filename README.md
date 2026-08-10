@@ -537,6 +537,35 @@ a interpretação fica com quem tem referência da área.
 | Rio Uruguai | 74,8 | média | 0,129 km/km² |
 | Guaíba | 74,1 | alta | 0,154 km/km² |
 
+## Integridade do cadastro
+
+O total de estações inflava a cada coleta — 565, 602, 654 — por dois motivos
+que se somavam.
+
+**Duplicatas por chave instável.** O id era `SACE_{bacia}_{pm}_{s}_{sr}`, mas
+`s` e `sr` identificam séries do gráfico, não a estação, e o SGB os renumerou.
+A mesma estação passou a chegar com id novo e a antiga ficou: 55 coordenadas
+com estação repetida, Porto Mauá gravado três vezes. O `pm` é estável, e a
+chave passou a ser só `SACE_{bacia}_{pm}`.
+
+**Duplicatas entre bacias.** A página do Guaíba reexibe estações do Taquari e
+do Caí, porque esses rios drenam para lá. A mesma estação física chega duas
+vezes, e as cópias não são idênticas: a coordenada difere uns 30 m e o código
+oficial vem em formatos distintos — Santa Tereza como `8647260` e `86472600`,
+Vacaria como `2850045` e `02850045`. A cópia da página agregadora vem sem
+leitura. Fica a que tem dado; no empate, a da bacia específica, que é a que
+carrega as cotas oficiais.
+
+**Órfãs nunca removidas.** `INSERT OR REPLACE` só insere e atualiza. Estação que
+some da fonte, ou que muda de id, ficava para sempre no banco com a leitura
+velha, aparecendo no mapa como se fosse atual — eram 78.
+
+A limpeza tem guarda: só apaga órfãs da fonte que trouxe um número plausível de
+estações naquela rodada. Sem isso, a falha silenciosa do SACE em agosto teria
+apagado todas as estações dele.
+
+Resultado: **551 estações, zero duplicatas, zero órfãs**.
+
 ## Robustez
 
 O projeto roda sem nenhum aviso: `pyflakes` zerado nos seis módulos, nenhum

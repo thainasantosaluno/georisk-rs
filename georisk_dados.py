@@ -401,9 +401,19 @@ def _mapa_sace(bacia: str) -> list[dict]:
             )
         estacoes.append(
             {
-                # A chave usa a bacia REAL do relatório (a página 'guaiba'
-                # reexibe estações de 'cai'/'taquari'; isso deduplica sozinho).
-                "id": f"SACE_{bac}_{pm}_{s}_{sr}",
+                # CHAVE: bacia + pm, e nada mais.
+                #
+                # Antes era `SACE_{bacia}_{pm}_{s}_{sr}`. Os parâmetros `s` e
+                # `sr` identificam séries do gráfico, não a estação, e o SGB os
+                # renumerou: a mesma estação passou a chegar com id novo, o
+                # antigo continuou no banco, e o resultado foram 55 coordenadas
+                # com estações duplicadas — Porto Mauá gravado três vezes.
+                #
+                # O `pm` é estável: Iraí é pm=37 nas duas versões, Porto Mauá é
+                # pm=56 nas três. A bacia entra porque a página 'guaiba'
+                # reexibe estações de 'cai' e 'taquari', e usar a bacia real do
+                # relatório deduplica isso sozinho.
+                "id": f"SACE_{bac}_{pm}",
                 "fonte": "SACE/SGB",
                 "codigo": codigo,
                 "nome": nome,
@@ -1069,6 +1079,32 @@ def sincronizar(
         erros += erros_ana
         avisar(0.88, f"ANA: {len(ana)} estações telemétricas.")
 
+    # --- Mesma estação publicada em duas bacias do SACE.
+    #
+    # A página do Guaíba reexibe estações do Taquari e do Caí, porque esses
+    # rios drenam para o Guaíba. A mesma estação física chega então duas vezes,
+    # com `pm` diferente em cada página — e as duas versões não são idênticas:
+    # a coordenada difere uns 30 m e o código oficial vem em formatos distintos
+    # (Santa Tereza como 8647260 e 86472600; Vacaria como 2850045 e 02850045).
+    #
+    # A cópia da página agregadora costuma vir SEM leitura. Ficamos com a que
+    # tem dado; havendo empate, com a da bacia específica, que é a que carrega
+    # as cotas oficiais.
+    def _peso(est: dict) -> tuple:
+        tem_nivel = est.get("nivel_cm") is not None
+        tem_cota = est.get("cota_inundacao_cm") is not None
+        especifica = "guaiba" not in str(est.get("id", ""))
+        return (tem_nivel, tem_cota, especifica)
+
+    unicas: list[dict] = []
+    for cand in sorted(sace, key=_peso, reverse=True):
+        if any(_muito_perto(cand, ja, graus=0.002) for ja in unicas):
+            continue
+        unicas.append(cand)
+    if len(unicas) < len(sace):
+        avisar(0.56, f"{len(sace) - len(unicas)} duplicata(s) entre bacias removida(s).")
+    sace = unicas
+
     # SACE tem prioridade: é a única fonte com cota oficial de inundação.
     # `_padronizar` roda por último para que TODAS as linhas — não importa a
     # origem — saiam no mesmo formato, unidade e vocabulário.
@@ -1097,6 +1133,40 @@ def sincronizar(
 
     avisar(0.94, f"Gravando {len(finais)} estações no banco…")
     _gravar(finais)
+
+    # --- REMOVE ÓRFÃS: estação que sumiu da fonte tem de sumir do banco.
+    #
+    # `INSERT OR REPLACE` só insere e atualiza; nunca apaga. Estação que a
+    # fonte parou de publicar — ou que mudou de id, como aconteceu quando o
+    # SGB renumerou os parâmetros — ficava no banco para sempre, com a leitura
+    # velha, aparecendo no mapa como se fosse atual. Eram 78 assim.
+    #
+    # A guarda importa: só limpamos a fonte que trouxe um número plausível de
+    # estações nesta rodada. Sem isso, uma coleta que falhasse (como a do SACE
+    # em agosto, que devolveu zero por três dias sem acusar erro) apagaria
+    # todas as estações daquela fonte.
+    for fonte_nome, coletadas, minimo in (
+        ("SACE/SGB", sace, 10),
+        ("ANA telemetria", ana if incluir_ana else None, 50),
+    ):
+        if coletadas is None or len(coletadas) < minimo:
+            continue
+        vivos = {e["id"] for e in finais if e.get("fonte") == fonte_nome}
+        if not vivos:
+            continue
+        marcas = ",".join("?" * len(vivos))
+        with conectar() as con:
+            orfas = [
+                r[0] for r in con.execute(
+                    f"SELECT id FROM estacao WHERE fonte=? AND id NOT IN ({marcas})",
+                    (fonte_nome, *sorted(vivos)),
+                )
+            ]
+            if orfas:
+                m2 = ",".join("?" * len(orfas))
+                con.execute(f"DELETE FROM estacao WHERE id IN ({m2})", orfas)
+                con.execute(f"DELETE FROM serie WHERE id_estacao IN ({m2})", orfas)
+                avisar(0.96, f"{len(orfas)} estação(ões) órfã(s) de {fonte_nome} removida(s).")
 
     fontes = "SACE/SGB" + (" + ANA telemetria" if incluir_ana else "")
     with conectar() as con:
