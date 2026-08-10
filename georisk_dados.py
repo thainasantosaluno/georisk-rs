@@ -1360,6 +1360,11 @@ def coletar_historico(
             "ORDER BY nome"
         ).fetchall()
 
+    # O `limite_estacoes` tinha parado de ser aplicado quando a consulta foi
+    # reescrita para apontar às estações do SACE: quem pedisse 6 recebia todas.
+    if limite_estacoes:
+        estacoes = estacoes[:limite_estacoes]
+
     def variantes(codigo: str) -> list[str]:
         """Formatos possíveis do código na base histórica da ANA."""
         base = str(codigo).strip()

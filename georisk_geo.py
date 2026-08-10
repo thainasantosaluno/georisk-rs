@@ -339,7 +339,6 @@ def _kml_para_geojson(kml: str) -> dict:
     anéis externos e internos de cada um e montamos um MultiPolygon.
     """
     raiz = ET.fromstring(kml)
-    ns = {"k": "http://www.opengis.net/kml/2.2"}
 
     def anel(elemento) -> list[list[float]]:
         texto = (elemento.text or "").strip()
@@ -1415,7 +1414,6 @@ def faixas_de_incerteza(
     cota_max_cm: float,
     nome_rio: str | None = None,
     db_path: str = CAMINHO_BANCO_PADRAO,
-    cota_atual_cm: float | None = None,
 ) -> list[dict]:
     """Mancha da COTA PROJETADA, com as cores marcando a incerteza.
 

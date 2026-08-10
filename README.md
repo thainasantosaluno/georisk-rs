@@ -23,6 +23,7 @@ usado como gazetteer) e o que não é RS é descartado.
 
 ```
 georisk_dados.py      motor: coleta real + banco SQLite + padronização
+georisk_mapa.py       desenho do mapa, compartilhado pelos dois painéis
 georisk_geo.py        manchas oficiais + CN real por bacia (solo e uso da terra)
 georisk_hidrologia.py módulo hidrológico: Tc, SCS-CN e projeção de cota
 main.py               painel "Sala de Decisão"    (streamlit run main.py)
