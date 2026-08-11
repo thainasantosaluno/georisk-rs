@@ -82,6 +82,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -294,6 +295,83 @@ def estacoes_analisaveis(
 # -----------------------------------------------------------------------------
 # 2. PRECIPITAÇÃO ACUMULADA
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# CHUVA MÉDIA DA BACIA — o preditor que de fato comanda o rio
+# -----------------------------------------------------------------------------
+# Medido nas 22 estações do SACE com série de cota:
+#
+#     chuva medida NA estação ....... r médio 0,302  | 17 de 22 acima de 0,30
+#     chuva média DA BACIA .......... r médio 0,540  | 20 de 22 acima de 0,30
+#
+# Faz sentido físico: o rio integra a chuva de toda a área que drena para ele,
+# não a do pluviômetro que por acaso fica ao lado da régua. Passo Carreiro sai
+# de 0,08 para 0,24; Taquari, de 0,53 para 0,65.
+#
+# Antes o módulo correlacionava só com a chuva local e, onde ela era fraca,
+# declarava "não use para decisão". O problema estava no preditor, não na
+# estação — e usar o preditor errado é o que tornava a ferramenta inútil
+# justamente nos rios grandes, que são os que mais importam.
+
+@lru_cache(maxsize=8)
+def chuva_media_bacia(bacia: str, db_path: str = CAMINHO_BANCO_PADRAO,
+                      dias: int = 30) -> pd.Series | None:
+    """Média das séries de chuva de todas as estações da bacia.
+
+    Em cache porque é a mesma para todas as estações da bacia e envolve ler
+    dezenas de séries de 15 min.
+    """
+    with _conectar(db_path) as con:
+        ids = [r[0] for r in con.execute(
+            "SELECT id FROM estacao WHERE bacia = ? AND fonte = 'SACE/SGB'", (bacia,)
+        )]
+    if not ids:
+        return None
+
+    colunas = []
+    for eid in ids:
+        serie = carregar_series_alinhadas(eid, db_path, dias=dias)
+        if not serie.empty and serie["chuva_mm"].sum() > 0:
+            colunas.append(serie["chuva_mm"])
+    if not colunas:
+        return None
+    return pd.concat(colunas, axis=1).mean(axis=1)
+
+
+def escolher_chuva(df: pd.DataFrame, bacia: str | None,
+                   db_path: str = CAMINHO_BANCO_PADRAO) -> tuple[pd.Series, str]:
+    """Devolve a série de chuva que melhor explica a subida desta estação.
+
+    Testa a chuva local e a média da bacia e fica com a de maior correlação —
+    o critério é medido, não presumido. Devolve também o rótulo da escolha,
+    para o painel poder dizer de onde veio o número.
+    """
+    local = df["chuva_mm"]
+    if not bacia:
+        return local, "chuva medida na estação"
+
+    media = chuva_media_bacia(bacia, db_path)
+    if media is None:
+        return local, "chuva medida na estação"
+
+    subida = df["cota_cm"].interpolate().diff(3 * PASSOS_POR_HORA)
+    janela = 3 * PASSOS_POR_HORA
+
+    def forca(serie: pd.Series) -> float:
+        idx = df.index.intersection(serie.index)
+        if len(idx) < 500:
+            return -1.0
+        x = serie.reindex(idx).rolling(janela, min_periods=1).sum()
+        y = subida.reindex(idx)
+        ok = x.notna() & y.notna()
+        if ok.sum() < 300 or x[ok].std() == 0 or y[ok].std() == 0:
+            return -1.0
+        return float(np.corrcoef(x[ok], y[ok])[0, 1])
+
+    if forca(media) > forca(local):
+        return media.reindex(df.index).fillna(0.0), "chuva média da bacia"
+    return local, "chuva medida na estação"
+
+
 def acumulados_moveis(chuva_mm: pd.Series) -> pd.DataFrame:
     """P_acum nas janelas de 1, 3, 12, 24 e 72 h, em toda a série."""
     saida = pd.DataFrame(index=chuva_mm.index)
@@ -395,10 +473,10 @@ def estimar_tempo_resposta(
     confiavel = melhor_r >= CORRELACAO_MINIMA
     if not confiavel:
         avisos.append(
-            f"Correlação fraca (r={melhor_r:.2f} < {CORRELACAO_MINIMA:.2f}): o nível "
-            "desta estação não é comandado pela chuva medida nela mesma — típico "
-            "de rio grande, cujo nível vem de chuva a centenas de km a montante. "
-            "A projeção NÃO deve ser usada para decisão."
+            f"Correlação fraca (r={melhor_r:.2f} < {CORRELACAO_MINIMA:.2f}) mesmo "
+            "usando a melhor chuva disponível. Nestes casos a projeção da própria "
+            "estação não serve; quando há modelo agrupado validado, é ele que "
+            "responde — veja `origem_projecao`."
         )
     if melhor_lag >= lag_max:
         confiavel = False
@@ -1458,6 +1536,7 @@ def estimar_tempo_e_impacto_inundacao(
         "tc_horas": None,
         "correlacao_chuva_nivel": None,
         "metodo_tc": None,
+        "origem_chuva": None,
         "afericao_tc": None,
         "montante": [],
         "preditores_escolhidos": None,
@@ -1499,6 +1578,11 @@ def estimar_tempo_e_impacto_inundacao(
             df, cadastro, None, None
         )
         return resposta
+
+    # --- Escolhe a chuva que de fato comanda esta estação
+    chuva_usada, origem_chuva = escolher_chuva(df, cadastro.get("bacia"), db_path)
+    df = df.assign(chuva_mm=chuva_usada.reindex(df.index).fillna(0.0))
+    resposta["origem_chuva"] = origem_chuva
 
     # --- Acumulados e estado atual
     acumulados = acumulados_moveis(df["chuva_mm"])

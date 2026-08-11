@@ -537,6 +537,32 @@ a interpretação fica com quem tem referência da área.
 | Rio Uruguai | 74,8 | média | 0,129 km/km² |
 | Guaíba | 74,1 | alta | 0,154 km/km² |
 
+## Qual chuva comanda o rio
+
+O módulo correlacionava o nível só com a chuva medida **na própria estação** e,
+onde ela era fraca, declarava "não use para decisão". O problema estava no
+preditor, não na estação — e usar o preditor errado inutilizava a ferramenta
+justamente nos rios grandes, que são os que mais importam.
+
+Medido nas 22 estações do SACE com série de cota:
+
+| Preditor | r médio | Fortes (> 0,30) |
+|---|---|---|
+| Chuva medida na estação | 0,302 | 17 de 22 |
+| **Chuva média da bacia** | **0,540** | **20 de 22** |
+
+Faz sentido físico: o rio integra a chuva de toda a área que drena para ele,
+não a do pluviômetro que por acaso fica ao lado da régua. Passo Carreiro sai de
+0,08 para 0,24; Taquari, de 0,53 para 0,65.
+
+`escolher_chuva()` testa as duas e fica com a de maior correlação — critério
+medido, não presumido — e `origem_chuva` registra qual foi usada. Das 22
+estações, 14 se explicam melhor pela chuva da bacia e 8 pela local.
+
+Duas seguem fracas mesmo assim: **Passo Carreiro** (0,07) e **Passo São Borja**
+(0,14). Para essas a projeção vem do modelo agrupado, e isso fica dito no
+`origem_projecao` em vez de mascarado.
+
 ## Confiabilidade da projeção
 
 O painel dizia "projeção sem confiabilidade estatística" para quase todas as
