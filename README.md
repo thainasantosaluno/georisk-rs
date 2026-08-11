@@ -537,6 +537,47 @@ a interpretação fica com quem tem referência da área.
 | Rio Uruguai | 74,8 | média | 0,129 km/km² |
 | Guaíba | 74,1 | alta | 0,154 km/km² |
 
+## Relevo (MDE)
+
+`georisk_relevo.py` usa o **Copernicus DEM GLO-30** (30 m, aberto, sem
+autenticação). São COG, então dá para ler **só a janela de interesse** por
+`/vsicurl/` — recortar a vizinhança de uma estação leva ~3 s, sem baixar o tile
+de 49 MB.
+
+```bash
+python georisk_relevo.py -29.2352 -51.8551
+```
+
+Em Encantado: talvegue a 28,5 m, máxima 564 m, declividade média 25,6 %. E a
+curva de área alagada por altura mostra a não linearidade que torna a cheia
+catastrófica — de 10 m para 20 m acima do talvegue a área **triplica**, de
+4,2 para 15,1 km², porque o vale se abre.
+
+### A âncora do datum, e por que ela decide tudo
+
+A régua marca zero num datum próprio da estação, muito acima do fundo do vale —
+em Lajeado, 18,5 m acima. Tratar a cota como altura sobre o talvegue inundou
+**4,7 vezes** a área real.
+
+Passando a cota de inundação oficial como referência — por definição, o nível em
+que o alagamento começa — o resultado bate com a modelagem hidráulica do
+IPH-UFRGS:
+
+| Cota | Oficial | MDE | Razão |
+|---|---|---|---|
+| 1.900 cm | 3,65 km² | 4,03 | 1,10× |
+| 2.200 cm | 5,62 km² | 5,78 | 1,03× |
+| 2.500 cm | 9,80 km² | 7,15 | 0,73× |
+| 2.800 cm | 15,41 km² | 10,31 | 0,67× |
+| 3.100 cm | 18,33 km² | 17,01 | 0,93× |
+| | | **média** | **0,89×** |
+
+Dentro de ±35 % da modelagem hidráulica. É preenchimento por altura, não modelo
+hidráulico: não considera velocidade, rugosidade, diques nem conectividade — uma
+depressão isolada entra como alagada ainda que a água não tenha por onde chegar.
+Melhor que largura proporcional, pior que o IPH. Onde houver mancha oficial,
+use a oficial.
+
 ## Qual chuva comanda o rio
 
 O módulo correlacionava o nível só com a chuva medida **na própria estação** e,
