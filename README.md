@@ -752,6 +752,51 @@ estava, quando a bacia dele tem **73,3**.
 
 O controle saiu. O CN vem do dado e aparece no balanço com a origem declarada.
 
+## Camada de publicação — pronta, e desligada
+
+`georisk_publicar.py` gera o que um site público consumiria. **Existe, funciona
+e está dormente**: o site não está no ar, e nada é publicado automaticamente.
+
+```bash
+python georisk_publicar.py
+```
+
+| Arquivo | Conteúdo | Tamanho |
+|---|---|---|
+| `site/api/resumo.json` | cabeçalho, frescor, fontes e **limitações declaradas** | 1,6 KB |
+| `site/api/estacoes.json` | 552 estações com leitura atual e cotas oficiais | 285 KB |
+| `site/api/projecoes.json` | quanto sobe, em quanto tempo, e por qual régua | 38 KB |
+
+### Por que estático
+
+O objetivo é consulta pública gratuita, e serviço com banco hospedado custa por
+mês e cai quando a conta acaba. O coletor já roda de 3 em 3 horas no GitHub
+Actions e já versiona o resultado — publicar é só escrever JSON junto, que o
+GitHub Pages serve de graça, com CDN, sem servidor e sem banco.
+
+O custo é que o site fica tão fresco quanto a última rodada. Por isso todo
+arquivo carrega `gerado_em` e `idade_minutos`, e a idade é para ser mostrada em
+vez de fingir tempo real.
+
+### As limitações viajam junto com o dado
+
+`resumo.json` carrega a lista de limitações **dentro do JSON**, não só na
+página: quem consumir a API por fora não as perde pelo caminho. São as quatro
+que o projeto sustenta — não há previsão meteorológica, a projeção vale até
+metade do Tc, nem toda estação tem cota oficial, e mancha modelada existe para
+poucos municípios.
+
+### Como acionar
+
+Na aba **Actions**, rodar o workflow na mão marcando **`publicar`**. Só nessa
+execução os JSON são gerados e versionados; `site/api/` está no `.gitignore`
+até lá, e o passo usa `git add -f` quando acionado.
+
+Para deixar permanente: trocar `if: ${{ inputs.publicar }}` por `if: true` em
+`.github/workflows/coleta.yml` e habilitar o GitHub Pages apontando para
+`site/`. Falta ainda a página que consome esses JSON — a camada entrega o dado,
+não a interface.
+
 ## Integridade do cadastro
 
 O total de estações inflava a cada coleta — 565, 602, 654 — por dois motivos

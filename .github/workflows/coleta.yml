@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: "0 */3 * * *"   # de 3 em 3 horas (UTC)
   workflow_dispatch:         # permite rodar na mão pela aba Actions
+    inputs:
+      publicar:
+        description: "Gerar tambem os JSON publicos em site/api/"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -56,11 +61,23 @@ jobs:
         continue-on-error: true
         run: python georisk_hidrologia.py --projetar --exportar dados/projecao.csv
 
+      - name: Gerar os JSON publicos (camada de publicacao)
+        # DORMENTE POR PADRAO. A camada existe e e testada, mas o site nao esta
+        # no ar: enquanto estiver assim, gerar 285 KB de JSON a cada 3 h so
+        # polui o historico. Para acionar, rode o workflow na mao pela aba
+        # Actions marcando "publicar", ou troque esta condicao por `true`.
+        if: ${{ inputs.publicar }}
+        run: python georisk_publicar.py --pasta site
+
       - name: Publicar snapshot se houve mudança
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dados/
+          # site/api/ está no .gitignore enquanto a publicação estiver
+          # dormente. Quando for acionada, o -f entra em vigor e os JSON
+          # passam a ser versionados junto com o snapshot.
+          if [ "${{ inputs.publicar }}" = "true" ]; then git add -f site/api/; fi
           if git diff --staged --quiet; then
             echo "Nada mudou nesta rodada."
           else

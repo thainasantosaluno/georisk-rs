@@ -18,3 +18,9 @@ desktop.ini
 # Configuracao local do Claude Code / VS Code
 .claude/
 Claude/
+
+# Saida da camada de publicacao. O modulo georisk_publicar.py existe e
+# funciona, mas o site NAO esta no ar: enquanto estiver dormente, nao faz
+# sentido versionar 285 KB de JSON regerado a cada 3 h. Para acionar, veja a
+# secao "Camada de publicacao" do README.
+site/api/
