@@ -2158,17 +2158,47 @@ def _classificar_subida(
     return "estavel", f"variação de {fracao * 100:.0f} % da amplitude de 30 dias"
 
 
+COLUNAS_PROJECAO = (
+    "id_estacao", "nome", "municipio", "bacia", "calculado_em",
+    "chuva_24h_mm", "chuva_72h_mm", "volume_escoado_m3", "cn_base",
+    "cota_atual_cm", "pico_projetado_cm", "variacao_cm",
+    "tc_horas", "instante_pico", "horizonte_util_horas",
+    "confiavel", "origem_projecao", "tendencia",
+    "classe", "motivo", "horas_ate_inundacao",
+)
+
+
 def criar_schema_projecao(db_path: str = CAMINHO_BANCO_PADRAO) -> None:
+    """Cria a tabela do cache, recriando-a se o conjunto de colunas mudou.
+
+    É cache puro — reconstruído em 1,2 min por `atualizar_projecoes()` — então
+    descartar na mudança de esquema é mais honesto que migrar: evita que uma
+    coluna nova fique nula em metade das linhas e o painel mostre buraco sem
+    explicar por quê.
+    """
     with _conectar(db_path) as con:
+        existentes = [
+            c[1] for c in con.execute("PRAGMA table_info(projecao_cache)").fetchall()
+        ]
+        if existentes and set(existentes) != set(COLUNAS_PROJECAO):
+            con.execute("DROP TABLE projecao_cache")
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS projecao_cache (
                 id_estacao   TEXT PRIMARY KEY,
+                nome         TEXT,
+                municipio    TEXT,
+                bacia        TEXT,
                 calculado_em TEXT,
+                chuva_24h_mm          REAL,
+                chuva_72h_mm          REAL,
+                volume_escoado_m3     REAL,
+                cn_base               REAL,
                 cota_atual_cm         REAL,
                 pico_projetado_cm     REAL,
                 variacao_cm           REAL,
                 tc_horas              REAL,
+                instante_pico         TEXT,
                 horizonte_util_horas  REAL,
                 confiavel             INTEGER,
                 origem_projecao       TEXT,
@@ -2200,9 +2230,14 @@ def atualizar_projecoes(
 
     for n, r in enumerate(elegiveis.itertuples(), start=1):
         registro = {
-            "id_estacao": r.id, "calculado_em": agora,
+            "id_estacao": r.id, "nome": r.nome, "municipio": r.municipio,
+            "bacia": r.bacia,
+            "calculado_em": agora,
+            "chuva_24h_mm": None, "chuva_72h_mm": None,
+            "volume_escoado_m3": None, "cn_base": None,
             "cota_atual_cm": None, "pico_projetado_cm": None, "variacao_cm": None,
-            "tc_horas": None, "horizonte_util_horas": None, "confiavel": 0,
+            "tc_horas": None, "instante_pico": None,
+            "horizonte_util_horas": None, "confiavel": 0,
             "origem_projecao": None, "tendencia": None,
             "classe": "indefinida", "motivo": "não calculada",
             "horas_ate_inundacao": None,
@@ -2220,11 +2255,18 @@ def atualizar_projecoes(
                 },
             )
             atual, pico = res.get("cota_atual_cm"), res.get("cota_maxima_projetada_cm")
+            acum = res.get("precipitacao_acumulada_mm") or {}
+            bal = res.get("balanco_hidrico") or {}
             registro.update({
+                "chuva_24h_mm": acum.get("24h"),
+                "chuva_72h_mm": acum.get("72h"),
+                "volume_escoado_m3": bal.get("volume_escoado_m3"),
+                "cn_base": res.get("cn_base"),
                 "cota_atual_cm": atual,
                 "pico_projetado_cm": pico,
                 "variacao_cm": None if atual is None or pico is None else pico - atual,
                 "tc_horas": res.get("tc_horas"),
+                "instante_pico": res.get("instante_pico_projetado"),
                 "horizonte_util_horas": res.get("horizonte_util_horas"),
                 "confiavel": int(bool(res.get("confiavel"))),
                 "origem_projecao": res.get("origem_projecao"),
@@ -2243,10 +2285,9 @@ def atualizar_projecoes(
     tabela = pd.DataFrame(linhas)
     with _conectar(db_path) as con:
         con.executemany(
-            "INSERT OR REPLACE INTO projecao_cache VALUES "
-            "(:id_estacao,:calculado_em,:cota_atual_cm,:pico_projetado_cm,"
-            ":variacao_cm,:tc_horas,:horizonte_util_horas,:confiavel,"
-            ":origem_projecao,:tendencia,:classe,:motivo,:horas_ate_inundacao)",
+            "INSERT OR REPLACE INTO projecao_cache ("
+            + ",".join(COLUNAS_PROJECAO) + ") VALUES ("
+            + ",".join(f":{c}" for c in COLUNAS_PROJECAO) + ")",
             linhas,
         )
     return tabela

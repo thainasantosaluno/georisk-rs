@@ -625,9 +625,11 @@ with tab_manchas:
 with tab_hidro:
     st.subheader("💧 Relação Chuva x Nível, tempo de resposta e projeção")
     st.caption(
-        "Correlação cruzada chuva x taxa de subida do rio para obter o tempo de "
-        "resposta (Tc), balanço volumétrico SCS-CN com umidade antecedente de "
-        "72 h, e projeção da cota até cruzar as cotas oficiais do SACE."
+        "Quanto choveu sobre a área contribuinte, quanto disso escoa segundo o "
+        "solo e o uso da terra da bacia, quanto o rio sobe por causa disso e em "
+        "quanto tempo. O cruzamento das cotas oficiais do SACE é consequência, "
+        "não o objetivo da conta — e as estações sem cota publicada continuam "
+        "tendo projeção de quanto e quando."
     )
 
     @st.cache_data(ttl=300)
@@ -883,33 +885,103 @@ with tab_hidro:
 
         resultado = _analisar(estacao_id)
 
-        # --- Indicadores
-        k1, k2, k3, k4 = st.columns(4)
+        # --- A CADEIA: choveu -> escoou -> sobe -> em quanto tempo
+        #
+        # O cabeçalho mostrava "Até a Cota de Inundação", o que fazia a cota
+        # oficial parecer o objetivo da conta. Não é: 33 das 59 estações não
+        # têm cota publicada e continuam tendo projeção. O que o modelo produz
+        # é quanto sobe e quando, a partir do que choveu sobre a bacia e das
+        # características dela. O cruzamento de limiar é leitura derivada, e
+        # está logo abaixo, na tabela de cotas oficiais.
+        acum = resultado.get("precipitacao_acumulada_mm") or {}
+        balanco = resultado.get("balanco_hidrico") or {}
         aferic = resultado.get("afericao_tc")
-        k1.metric(
-            "Tempo de resposta (Tc)",
+        atual_cm = resultado["cota_atual_cm"]
+        pico_cm = resultado["cota_maxima_projetada_cm"]
+
+        k1, k2, k3, k4 = st.columns(4)
+
+        k1.metric("1 · Choveu (72 h)", texto(acum.get("72h"), " mm", 1))
+        k1.caption(ou(resultado.get("origem_chuva"), "chuva da própria estação"))
+
+        volume = balanco.get("volume_escoado_m3")
+        k2.metric(
+            "2 · Escoou",
+            "Sem dado" if volume is None or pd.isna(volume)
+            else (f"{volume / 1e6:.1f} milhões m³" if volume >= 1e6 else f"{volume:,.0f} m³"),
+        )
+        k2.caption(
+            f"CN {texto(resultado.get('cn_base'), '', 1)} · "
+            f"escoa {texto((balanco.get('coeficiente_escoamento') or 0) * 100, ' %', 0)} "
+            f"do que cai · solo em "
+            f"{texto((resultado.get('vulnerabilidade') or {}).get('saturacao_pct'), ' %', 0)}"
+        )
+
+        k3.metric(
+            "3 · Sobe até",
+            texto(pico_cm, " cm"),
+            delta=(
+                None if pico_cm is None or atual_cm is None
+                else f"{pico_cm - atual_cm:+.0f} cm sobre os {atual_cm:.0f} de agora"
+            ),
+        )
+        k3.caption(f"tendência: {ou(resultado.get('tendencia'))}")
+
+        k4.metric(
+            "4 · Em",
             f"{resultado['tc_horas']:.1f} h" if resultado["tc_horas"] else "Indeterminado",
-            help="Defasagem de maior correlação entre a chuva e a subida do rio."
+            help="Tempo de resposta da bacia: defasagem de maior correlação "
+                 "entre a chuva e a taxa de subida do rio."
                  + (f" Aferição pela densidade de drenagem ({aferic['densidade_drenagem']}): "
                     f"esperado {aferic['tc_esperado_h'][0]:.0f}–{aferic['tc_esperado_h'][1]:.0f} h — "
                     f"{aferic['veredito']}." if aferic else ""),
         )
-        k2.metric("Cota atual", texto(resultado["cota_atual_cm"], " cm"))
-        k3.metric(
-            "Cota máxima projetada",
-            texto(resultado["cota_maxima_projetada_cm"], " cm"),
-            delta=(
-                None
-                if resultado["cota_maxima_projetada_cm"] is None
-                or resultado["cota_atual_cm"] is None
-                else f"{resultado['cota_maxima_projetada_cm'] - resultado['cota_atual_cm']:+.0f} cm"
-            ),
+        pico_em = resultado.get("instante_pico_projetado")
+        k4.caption(
+            f"pico em {pico_em}" if pico_em else "sem instante de pico projetado"
         )
-        horas = resultado["tempo_horas_ate_inundacao"]
-        k4.metric(
-            "Até a Cota de Inundação",
-            "JÁ ULTRAPASSADA" if horas == 0
-            else (f"{horas:.1f} h" if horas is not None else "Não projetada"),
+
+        # --- O que está empurrando o rio
+        #
+        # O balanço SCS-CN e a projeção são contas DIFERENTES e podem discordar:
+        # o SCS-CN é físico e só modela escoamento superficial da chuva nova; a
+        # projeção é estatística e usa nível, taxa de subida, cinco janelas de
+        # chuva e as características da bacia (CN, densidade de drenagem,
+        # lineamentos, área). Quando o balanço dá zero e o rio sobe assim mesmo,
+        # a diferença não é erro — é água que já está no sistema, e a tela deve
+        # dizer isso em vez de deixar parecer contradição.
+        sobe = (
+            pico_cm is not None and atual_cm is not None and pico_cm - atual_cm > 1
+        )
+        escoamento_nulo = not (balanco.get("volume_escoado_m3") or 0) > 0
+        montantes = resultado.get("montante") or []
+
+        if sobe and escoamento_nulo:
+            st.info(
+                f"**A chuva recente não gera escoamento superficial agora** — "
+                f"{texto(balanco.get('precipitacao_total_mm'), ' mm', 1)} não "
+                f"superam a abstração inicial de "
+                f"{texto(balanco.get('abstracao_inicial_mm'), ' mm', 1)} "
+                f"(solo em {texto(balanco.get('saturacao_pct'), ' %', 0)} de "
+                f"saturação). A subida projetada vem da água **já em trânsito**: "
+                f"o modelo lê o nível e a taxa de subida atuais junto com as "
+                f"janelas de chuva e as características da bacia. O balanço "
+                f"SCS-CN mede quanto a chuva NOVA acrescenta; a projeção mede "
+                f"para onde o rio vai.",
+                icon="💡",
+            )
+
+        st.caption(
+            "Entram na projeção: nível e taxa de subida atuais, chuva de 1 h, "
+            "3 h, 12 h, 24 h e 72 h, Curve Number da bacia, densidade de "
+            "drenagem, densidade de lineamentos e área — "
+            f"via {ou(resultado.get('origem_projecao'))}."
+            + (" Montante considerado: "
+               + ", ".join(f"{m['nome']} (+{m['lag_horas']:.1f} h, r={m['correlacao']:.2f})"
+                           for m in montantes)
+               + ("." if resultado.get("usou_montante")
+                  else " — testado e NÃO usado, não melhorou a previsão.")
+               if montantes else "")
         )
 
         # --- Confiabilidade em destaque: é o que decide se dá para usar
