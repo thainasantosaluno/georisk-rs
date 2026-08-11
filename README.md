@@ -19,6 +19,32 @@ inteira, então vinham estações de Santa Catarina junto; a UF de cada coordena
 é resolvida contra o cadastro telemétrico nacional da ANA (~5,2 mil estações,
 usado como gazetteer) e o que não é RS é descartado.
 
+### Cotas de referência: só o SACE publica
+
+Das 59 estações analisáveis, **26 têm cota oficial e 33 não**. Dessas 33, cinco
+são barragens (UHE/PCH/CGH), que não têm cota de inundação por natureza — sobram
+**28 estações de rio sem limiar**, 21 delas da telemetria da ANA.
+
+A ANA **tem** esses valores: o aplicativo dela emite alerta por cota de
+referência. Mas não os publica em interface aberta. Procurado em quatro vias,
+todas verificadas:
+
+| Via | Resultado |
+|---|---|
+| `hidroweb/rest/api/estacaotelemetrica` | 401 — exige token |
+| SOAP `ServiceANA.asmx` — as 12 operações | nenhuma devolve cota de referência |
+| `ListaEstacoesTelemetricas` (3,8 MB, rede inteira) | 13 campos, nenhum de limiar |
+| ArcGIS aberto `Estações_Hidrometeorológicas_SNIRH` | 73 campos; os `EscalaNivel*` são equipamento e data, não limiar |
+
+Por isso essas estações aparecem como *"sem cota de referência publicada"* em vez
+de receberem um limiar arbitrado. **Elas continuam tendo projeção** de quanto o
+rio sobe e em quanto tempo — o que falta é só a tradução disso em nível de
+alerta, que depende de um valor que a fonte não abre.
+
+Achado lateral aproveitável: o ArcGIS aberto traz `AreaDrenagem` **por estação**,
+mais preciso que a área da bacia inteira que o modelo agrupado usa hoje em
+`log_area`.
+
 ## Arquivos
 
 ```
