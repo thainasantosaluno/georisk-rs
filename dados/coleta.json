@@ -1,11 +1,11 @@
 {
-  "gerado_em": "2026-08-11 20:35:51",
+  "gerado_em": "2026-08-11 23:26:12",
   "ultima_coleta": {
-    "iniciada_em": "2026-08-11 20:31:48",
-    "terminada_em": "2026-08-11 20:35:51",
+    "iniciada_em": "2026-08-11 23:22:29",
+    "terminada_em": "2026-08-11 23:26:12",
     "fontes": "SACE/SGB + ANA telemetria",
     "estacoes": 552,
-    "erros": 82
+    "erros": 65
   },
   "total_estacoes": 552,
   "em_inundacao": 0,
