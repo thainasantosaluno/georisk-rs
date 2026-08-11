@@ -665,21 +665,149 @@ with tab_hidro:
             "coleta incluindo o SACE — é ele que publica a série de 15 em 15 min."
         )
     else:
-        c_sel, c_cn = st.columns([3, 1])
-        with c_sel:
-            rotulos = {
-                f"{r.nome} — {r.rio or 'rio não informado'} "
-                f"({r.chuva_mm_periodo:.0f} mm no período)": r.id
-                for r in elegiveis.itertuples()
-            }
-            escolhido = st.selectbox("Estação:", list(rotulos), key="hidro_estacao")
-            estacao_id = rotulos[escolhido]
-        with c_cn:
-            cn = st.slider(
-                "Curve Number (CN):", 40, 95, int(gh.CN_PADRAO),
-                help="Parâmetro de escoamento, não medição. 75 = bacia rural mista "
-                     "em solo B/C. Maior CN = solo que infiltra menos.",
+        def _rotulo(r) -> str:
+            """Rótulo completo da estação.
+
+            `ou()` e não `r.rio or ...`: rio vazio chega do SQLite como NaN, que
+            é verdadeiro em Python — o painel imprimia "Passo Tainhas — nan".
+            """
+            chuva = (
+                "sem chuva no período" if pd.isna(r.chuva_mm_periodo)
+                else f"{r.chuva_mm_periodo:.0f} mm no período"
             )
+            return f"{r.nome} — {ou(r.rio, 'rio não informado')} ({chuva})"
+
+        rotulos = {_rotulo(r): r.id for r in elegiveis.itertuples()}
+
+        # Fonte única da seleção: o rótulo escolhido. Mapa e lista escrevem
+        # aqui; tudo abaixo lê daqui. Revalidado porque a lista de estações
+        # elegíveis muda entre coletas e o rótulo guardado pode sumir.
+        if st.session_state.get("hidro_estacao") not in rotulos:
+            st.session_state["hidro_estacao"] = next(iter(rotulos))
+
+        def _selecionar(rotulo: str) -> None:
+            if rotulo != st.session_state.get("hidro_estacao"):
+                st.session_state["hidro_estacao"] = rotulo
+                st.rerun()
+
+        estacao_id = rotulos[st.session_state["hidro_estacao"]]
+        atual = elegiveis[elegiveis["id"] == estacao_id].iloc[0]
+
+        def _cor_da_cota(linha) -> tuple[str, str]:
+            """Cor do marcador pela leitura atual contra as cotas oficiais.
+
+            É o estado AGORA, não a projeção: projetar as 25 estações a cada
+            rerun custaria dezenas de segundos. A projeção é da selecionada.
+            """
+            nivel = linha.get("nivel_cm")
+            if nivel is None or pd.isna(nivel):
+                return "#9e9e9e", "sem leitura atual"
+            for campo, cor, nome in (
+                ("cota_inundacao_cm", "#f44336", "acima da inundação"),
+                ("cota_alerta_cm", "#ff9800", "acima do alerta"),
+                ("cota_atencao_cm", "#ffeb3b", "acima da atenção"),
+            ):
+                limiar = linha.get(campo)
+                if limiar is not None and not pd.isna(limiar) and nivel >= limiar:
+                    return cor, nome
+            return "#4caf50", "abaixo dos limiares"
+
+        col_mapa, col_lista = st.columns([2.4, 1])
+
+        with col_mapa:
+            centro = (
+                [atual["lat"], atual["lon"]]
+                if not pd.isna(atual["lat"]) and not pd.isna(atual["lon"])
+                else [-29.7, -51.8]
+            )
+            zoom_h = 9 if centro != [-29.7, -51.8] else 7
+
+            mapa_h = folium.Map(
+                location=centro, zoom_start=zoom_h,
+                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/"
+                      "World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri World Imagery",
+            )
+            folium.TileLayer(
+                tiles="https://{s}.basemaps.cartocdn.com/rastertiles/"
+                      "voyager_only_labels/{z}/{x}/{y}{r}.png",
+                attr="CartoDB Labels", overlay=True,
+            ).add_to(mapa_h)
+
+            for _, linha in elegiveis.dropna(subset=["lat", "lon"]).iterrows():
+                cor, estado = _cor_da_cota(linha)
+                ativa = linha["id"] == estacao_id
+                folium.CircleMarker(
+                    location=[linha["lat"], linha["lon"]],
+                    radius=11 if ativa else 7,
+                    color="#ffffff" if ativa else cor,
+                    weight=3 if ativa else 1,
+                    fill=True, fill_color=cor, fill_opacity=0.95,
+                    tooltip=(
+                        f"<b>{linha['nome']}</b><br>"
+                        f"{ou(linha.get('municipio'), 'município não informado')} · "
+                        f"{ou(linha.get('rio'), 'rio não informado')}<br>"
+                        f"Nível: {texto(linha.get('nivel_cm'), ' cm')} — {estado}<br>"
+                        f"Atenção: {texto(linha.get('cota_atencao_cm'), ' cm')} · "
+                        f"Alerta: {texto(linha.get('cota_alerta_cm'), ' cm')} · "
+                        f"Inundação: {texto(linha.get('cota_inundacao_cm'), ' cm')}"
+                        "<br><i>clique para analisar</i>"
+                    ),
+                ).add_to(mapa_h)
+
+            clique_h = st_folium(
+                mapa_h, width="100%", height=470, key="mapa_hidro",
+                returned_objects=["last_object_clicked"],
+            )
+
+            # O clique volta como coordenada, não como id — casamos pela
+            # estação mais próxima, com tolerância de ~2 km.
+            alvo = (clique_h or {}).get("last_object_clicked")
+            if alvo:
+                com_pos = elegiveis.dropna(subset=["lat", "lon"]).copy()
+                com_pos["dist"] = np.hypot(
+                    com_pos["lat"] - alvo["lat"], com_pos["lon"] - alvo["lng"]
+                )
+                perto = com_pos.nsmallest(1, "dist").iloc[0]
+                if perto["dist"] < 0.02:
+                    _selecionar(_rotulo(perto))
+
+        with col_lista:
+            st.markdown("**Estações analisáveis**")
+            busca_h = st.text_input(
+                "Filtrar", placeholder="filtrar por cidade ou rio…",
+                key="hidro_busca", label_visibility="collapsed",
+            )
+            alvo_busca = (busca_h or "").strip().lower()
+            visiveis = [r for r in rotulos if alvo_busca in r.lower()]
+
+            if not visiveis:
+                st.caption("Nenhuma estação com esse termo.")
+            with st.container(height=390):
+                for rotulo in visiveis:
+                    linha = elegiveis[elegiveis["id"] == rotulos[rotulo]].iloc[0]
+                    cor, _ = _cor_da_cota(linha)
+                    cidade = ou(linha.get("municipio"), linha["nome"])
+                    if st.button(
+                        f"{'🔵' if rotulos[rotulo] == estacao_id else '⚪'} {cidade}"
+                        f" — {texto(linha.get('nivel_cm'), ' cm')}",
+                        key=f"hidro_pick_{rotulos[rotulo]}",
+                        width="stretch",
+                        type="primary" if rotulos[rotulo] == estacao_id else "secondary",
+                    ):
+                        _selecionar(rotulo)
+
+            st.caption(
+                f"{len(visiveis)} de {len(rotulos)} · marcador pela leitura atual "
+                "contra as cotas oficiais, não pela projeção."
+            )
+
+        st.markdown(f"**Analisando:** {st.session_state['hidro_estacao']}")
+        cn = st.slider(
+            "Curve Number (CN):", 40, 95, int(gh.CN_PADRAO),
+            help="Parâmetro de escoamento, não medição. 75 = bacia rural mista "
+                 "em solo B/C. Maior CN = solo que infiltra menos.",
+        )
 
         resultado = _analisar(estacao_id, float(cn))
 

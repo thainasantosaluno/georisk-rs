@@ -271,11 +271,16 @@ def estacoes_analisaveis(
 
     Ordenadas por volume de chuva no período: quanto mais evento, mais
     confiável a estimativa de Tc.
+
+    Traz também posição, município e leitura atual — é o que o painel precisa
+    para plotar estas estações no mapa sem uma segunda consulta ao banco.
     """
     with _conectar(db_path) as con:
         df = pd.read_sql_query(
             """
             SELECT e.id, e.nome, e.rio, e.bacia, e.fonte,
+                   e.municipio, e.lat, e.lon,
+                   e.nivel_cm, e.situacao, e.medido_em,
                    e.cota_atencao_cm, e.cota_alerta_cm, e.cota_inundacao_cm,
                    SUM(CASE WHEN s.grandeza='cota'  THEN 1 ELSE 0 END) AS n_cota,
                    SUM(CASE WHEN s.grandeza='chuva' THEN 1 ELSE 0 END) AS n_chuva,
