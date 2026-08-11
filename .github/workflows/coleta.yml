@@ -35,8 +35,9 @@ jobs:
           cache: pip
 
       - name: Instalar dependências do coletor
-        # O coletor não precisa de streamlit/folium/plotly — só do essencial.
-        run: pip install pandas requests urllib3
+        # O coletor não precisa de streamlit/folium — mas o plotly entra porque
+        # o módulo hidrológico o importa no topo, e é ele que projeta.
+        run: pip install pandas requests urllib3 plotly
 
       - name: Coletar dados reais, exportar snapshot e arquivar série
         # O runner nasce vazio e morre a cada execução, então o banco aqui só
@@ -45,6 +46,15 @@ jobs:
         # exportador só reescreve os meses presentes no banco, unindo com o que
         # já estava versionado. Mês antigo não é tocado.
         run: python georisk_dados.py --exportar
+
+      - name: Projetar todas as estações
+        # O mapa do painel colore por projeção, e projetar as ~59 estações leva
+        # ~1,2 min — tempo demais para acontecer durante um rerun do Streamlit.
+        # Aqui roda de graça, e o CSV versionado deixa a projeção auditável
+        # depois do fato: dá para conferir o que o sistema previa às 09h UTC
+        # contra o que o rio fez de verdade.
+        continue-on-error: true
+        run: python georisk_hidrologia.py --projetar --exportar dados/projecao.csv
 
       - name: Publicar snapshot se houve mudança
         run: |

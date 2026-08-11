@@ -660,6 +660,42 @@ As 3 restantes e as 12 sem série não têm projeção porque **a fonte não pub
 o CSV de cota** para elas — limitação de origem, verificada estação por
 estação, não defeito do cálculo.
 
+### O mapa colore pela projeção, não pelo nível de agora
+
+A aba de previsão tem mapa de satélite com as estações analisáveis, e a cor
+responde "vai subir?" em vez de "está alto?". Isso exigiu tirar o cálculo da
+interação: projetar uma estação custa ~1,2 s e as 59 levam **1,2 min** — tempo
+demais para um rerun do Streamlit.
+
+A projeção roda no coletor (`--projetar`), grava em `projecao_cache` e sai
+versionada em `dados/projecao.csv`. O painel só lê, e mostra sempre a idade do
+cache. O CSV commitado torna a projeção **auditável depois do fato**: dá para
+conferir o que o sistema previa às 09 h UTC contra o que o rio realmente fez.
+
+A classificação tem duas camadas, na mesma hierarquia das manchas:
+
+| Camada | Quando vale | Regra |
+|---|---|---|
+| **Oficial** | 26 das 59 estações | maior cota do SACE que o pico projetado alcança |
+| **Amplitude recente** | as outras 33 | subida projetada como fração de `p95 − p05` da janela de 30 dias |
+
+A segunda camada existe porque não há alternativa: só 5 estações têm histórico
+longo o bastante para um percentil, e sem cota oficial não há limiar. Ela
+responde "vai subir muito para o que este rio costuma fazer?", que **não é** a
+mesma pergunta que "vai extravasar" — e o painel diz isso na legenda. Onde a
+janela de 30 dias não contém evento, a amplitude é pequena e a classe exagera.
+Limitação declarada, não estimativa disfarçada.
+
+### O slider de CN sobrescrevia o dado
+
+O painel tinha um controle de Curve Number de 40 a 95. O módulo hidrológico já
+resolve o CN **real** da bacia quando recebe `cn_base=None` — pedologia e uso da
+terra do IBGE, refinados pela litologia — e o slider passava por cima disso.
+Passo Carreiro estava sendo analisado com CN 52 porque era onde o controle
+estava, quando a bacia dele tem **73,3**.
+
+O controle saiu. O CN vem do dado e aparece no balanço com a origem declarada.
+
 ## Integridade do cadastro
 
 O total de estações inflava a cada coleta — 565, 602, 654 — por dois motivos

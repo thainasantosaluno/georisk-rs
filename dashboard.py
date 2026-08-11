@@ -635,7 +635,7 @@ with tab_hidro:
         return gh.estacoes_analisaveis()
 
     @st.cache_data(ttl=300, show_spinner="Modelando resposta da bacia…")
-    def _analisar(estacao_id: str, cn: float) -> dict:
+    def _analisar(estacao_id: str) -> dict:
         """Cacheia só os DADOS, nunca a figura.
 
         Guardar o objeto Figure do Plotly no cache fazia o Streamlit reusar o
@@ -643,7 +643,11 @@ with tab_hidro:
         `NotFoundError: Failed to execute 'removeChild' on 'Node'`. A figura é
         barata de remontar; a modelagem é que é cara.
         """
-        resultado = gh.estimar_tempo_e_impacto_inundacao(estacao_id, cn_base=cn)
+        # cn_base=None faz o módulo buscar o CN REAL da bacia (pedologia e uso
+        # da terra do IBGE, refinados pela litologia). O painel tinha um slider
+        # que sobrescrevia esse valor com um chute do usuário — Passo Carreiro
+        # analisado com CN 52 quando a bacia dele tem outro. Agora o dado manda.
+        resultado = gh.estimar_tempo_e_impacto_inundacao(estacao_id, cn_base=None)
         resultado.pop("grafico_hietograma_hidrograma", None)
         return resultado
 
@@ -693,12 +697,8 @@ with tab_hidro:
         estacao_id = rotulos[st.session_state["hidro_estacao"]]
         atual = elegiveis[elegiveis["id"] == estacao_id].iloc[0]
 
-        def _cor_da_cota(linha) -> tuple[str, str]:
-            """Cor do marcador pela leitura atual contra as cotas oficiais.
-
-            É o estado AGORA, não a projeção: projetar as 25 estações a cada
-            rerun custaria dezenas de segundos. A projeção é da selecionada.
-            """
+        def _cor_agora(linha) -> tuple[str, str]:
+            """Cor pela leitura ATUAL contra as cotas oficiais."""
             nivel = linha.get("nivel_cm")
             if nivel is None or pd.isna(nivel):
                 return "#9e9e9e", "sem leitura atual"
@@ -711,6 +711,66 @@ with tab_hidro:
                 if limiar is not None and not pd.isna(limiar) and nivel >= limiar:
                     return cor, nome
             return "#4caf50", "abaixo dos limiares"
+
+        # Escada única de cores para as duas réguas da projeção: a oficial
+        # (onde o SACE publica cota) e a amplitude recente (nas demais). A cor
+        # diz a gravidade; o balão diz por qual régua ela foi obtida.
+        CORES_PROJECAO = {
+            "inundacao": ("#f44336", "vai atingir a inundação"),
+            "subida_forte": ("#f44336", "subida forte"),
+            "alerta": ("#ff9800", "vai atingir o alerta"),
+            "subida_moderada": ("#ff9800", "subida moderada"),
+            "atencao": ("#ffeb3b", "vai atingir a atenção"),
+            "subida_leve": ("#ffeb3b", "subida leve"),
+            "abaixo": ("#4caf50", "abaixo das cotas oficiais"),
+            "estavel": ("#4caf50", "estável"),
+            "indefinida": ("#9e9e9e", "sem projeção"),
+        }
+
+        @st.cache_data(ttl=300)
+        def _projecoes() -> pd.DataFrame:
+            return gh.carregar_projecoes()
+
+        cache_proj = _projecoes()
+        tem_cache = not cache_proj.empty
+        por_estacao = (
+            cache_proj.set_index("id_estacao").to_dict("index") if tem_cache else {}
+        )
+
+        col_modo, col_idade = st.columns([1, 2])
+        with col_modo:
+            modo_cor = st.radio(
+                "Colorir marcadores por:", ["Projeção", "Leitura atual"],
+                horizontal=True, key="hidro_modo_cor",
+                disabled=not tem_cache,
+                help="A projeção vem de um cache calculado fora da interação — "
+                     "projetar as 59 estações leva ~1,2 min e travaria o painel.",
+            )
+        with col_idade:
+            if tem_cache:
+                calculado = cache_proj["calculado_em"].max()
+                idade = (pd.Timestamp.now() - pd.Timestamp(calculado)).total_seconds() / 60
+                aviso = "⚠️ desatualizada" if idade > 240 else "atualizada"
+                st.caption(
+                    f"Projeção {aviso} — calculada em {calculado} "
+                    f"({idade:.0f} min atrás). Recalcule com "
+                    "`python georisk_hidrologia.py --projetar`."
+                )
+            else:
+                modo_cor = "Leitura atual"
+                st.caption(
+                    "Projeção ainda não calculada — marcadores pela leitura atual. "
+                    "Rode `python georisk_hidrologia.py --projetar` para gerar."
+                )
+
+        def _cor_da_estacao(linha) -> tuple[str, str]:
+            if modo_cor == "Leitura atual":
+                return _cor_agora(linha)
+            reg = por_estacao.get(linha["id"])
+            if not reg:
+                return "#9e9e9e", "sem projeção no cache"
+            cor, _ = CORES_PROJECAO.get(reg["classe"], CORES_PROJECAO["indefinida"])
+            return cor, reg["motivo"]
 
         col_mapa, col_lista = st.columns([2.4, 1])
 
@@ -735,19 +795,29 @@ with tab_hidro:
             ).add_to(mapa_h)
 
             for _, linha in elegiveis.dropna(subset=["lat", "lon"]).iterrows():
-                cor, estado = _cor_da_cota(linha)
+                cor, estado = _cor_da_estacao(linha)
                 ativa = linha["id"] == estacao_id
+                reg = por_estacao.get(linha["id"]) or {}
+                pico = reg.get("pico_projetado_cm")
+                variacao = reg.get("variacao_cm")
                 folium.CircleMarker(
                     location=[linha["lat"], linha["lon"]],
-                    radius=11 if ativa else 7,
+                    # Pequenas de propósito: 59 marcadores grandes viravam
+                    # mancha contínua no zoom estadual e escondiam o terreno.
+                    radius=5 if ativa else 2.5,
                     color="#ffffff" if ativa else cor,
-                    weight=3 if ativa else 1,
+                    weight=2 if ativa else 0.5,
                     fill=True, fill_color=cor, fill_opacity=0.95,
                     tooltip=(
                         f"<b>{linha['nome']}</b><br>"
                         f"{ou(linha.get('municipio'), 'município não informado')} · "
                         f"{ou(linha.get('rio'), 'rio não informado')}<br>"
-                        f"Nível: {texto(linha.get('nivel_cm'), ' cm')} — {estado}<br>"
+                        f"Nível: {texto(linha.get('nivel_cm'), ' cm')}"
+                        + (f" → pico {texto(pico, ' cm')} "
+                           f"({variacao:+.0f} cm)" if pico is not None
+                           and not pd.isna(pico) and variacao is not None
+                           and not pd.isna(variacao) else "")
+                        + f"<br><b>{estado}</b><br>"
                         f"Atenção: {texto(linha.get('cota_atencao_cm'), ' cm')} · "
                         f"Alerta: {texto(linha.get('cota_alerta_cm'), ' cm')} · "
                         f"Inundação: {texto(linha.get('cota_inundacao_cm'), ' cm')}"
@@ -786,11 +856,16 @@ with tab_hidro:
             with st.container(height=390):
                 for rotulo in visiveis:
                     linha = elegiveis[elegiveis["id"] == rotulos[rotulo]].iloc[0]
-                    cor, _ = _cor_da_cota(linha)
+                    cor, _ = _cor_da_estacao(linha)
                     cidade = ou(linha.get("municipio"), linha["nome"])
+                    # A lista repete a cor do mapa — quem varre a lista vê a
+                    # mesma gravidade sem ter que procurar o ponto no terreno.
+                    bolinha = {
+                        "#f44336": "🔴", "#ff9800": "🟠", "#ffeb3b": "🟡",
+                        "#4caf50": "🟢",
+                    }.get(cor, "⚪")
                     if st.button(
-                        f"{'🔵' if rotulos[rotulo] == estacao_id else '⚪'} {cidade}"
-                        f" — {texto(linha.get('nivel_cm'), ' cm')}",
+                        f"{bolinha} {cidade} — {texto(linha.get('nivel_cm'), ' cm')}",
                         key=f"hidro_pick_{rotulos[rotulo]}",
                         width="stretch",
                         type="primary" if rotulos[rotulo] == estacao_id else "secondary",
@@ -798,18 +873,15 @@ with tab_hidro:
                         _selecionar(rotulo)
 
             st.caption(
-                f"{len(visiveis)} de {len(rotulos)} · marcador pela leitura atual "
-                "contra as cotas oficiais, não pela projeção."
+                f"{len(visiveis)} de {len(rotulos)} · "
+                + ("cor pela projeção — o balão diz por qual régua"
+                   if modo_cor == "Projeção" else
+                   "cor pela leitura atual contra as cotas oficiais")
             )
 
         st.markdown(f"**Analisando:** {st.session_state['hidro_estacao']}")
-        cn = st.slider(
-            "Curve Number (CN):", 40, 95, int(gh.CN_PADRAO),
-            help="Parâmetro de escoamento, não medição. 75 = bacia rural mista "
-                 "em solo B/C. Maior CN = solo que infiltra menos.",
-        )
 
-        resultado = _analisar(estacao_id, float(cn))
+        resultado = _analisar(estacao_id)
 
         # --- Indicadores
         k1, k2, k3, k4 = st.columns(4)

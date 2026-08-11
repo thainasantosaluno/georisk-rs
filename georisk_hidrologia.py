@@ -81,7 +81,7 @@ import math
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -2090,6 +2090,176 @@ def estimar_tempo_e_impacto_inundacao(
 
 
 # -----------------------------------------------------------------------------
+# CACHE DE PROJEÇÕES — para o mapa mostrar "vai subir", não "está alto"
+# -----------------------------------------------------------------------------
+# Projetar uma estação custa ~1,2 s. As 59 levam 1,2 min — inviável a cada
+# rerun do painel, e é por isso que o mapa nascia colorido pela leitura atual.
+# A saída é calcular fora da interação e guardar.
+
+# Frações da amplitude recente que separam as classes de subida. São
+# PARÂMETRO, escolhidos para dar uma escala legível, não limiar medido.
+FAIXAS_SUBIDA = ((0.50, "forte"), (0.25, "moderada"), (0.10, "leve"))
+
+
+def _classificar_subida(
+    cota_atual: float | None,
+    pico_projetado: float | None,
+    serie_cota: pd.Series | None,
+    cotas_oficiais: dict | None = None,
+) -> tuple[str, str]:
+    """Classe de risco da PROJEÇÃO, em duas camadas.
+
+    **Oficial primeiro.** Se a estação tem cota publicada pelo SACE, a classe é
+    a maior cota que o pico projetado alcança. É a mesma hierarquia das manchas:
+    onde existe limiar oficial, ele manda.
+
+    **Amplitude recente como régua de reserva.** Só 4 das 59 estações
+    analisáveis têm cota oficial, e apenas 5 têm histórico longo — não há
+    percentil confiável nem limiar para as outras 54. Sobra a única régua que
+    todas possuem: o quanto o próprio rio variou na janela de 30 dias. A subida
+    projetada é expressa como fração de `p95 − p05` dessa janela.
+
+    Isso responde "vai subir muito para o que este rio costuma fazer?", que não
+    é a mesma pergunta que "vai extravasar" — e a legenda do painel diz isso com
+    todas as letras. Onde a janela não contém evento, a amplitude é pequena e a
+    classe exagera; é limitação declarada, não estimativa disfarçada.
+    """
+    if cota_atual is None or pico_projetado is None:
+        return "indefinida", "sem projeção"
+
+    for campo, classe, rotulo in (
+        ("cota_inundacao_cm", "inundacao", "pico atinge a cota de inundação"),
+        ("cota_alerta_cm", "alerta", "pico atinge a cota de alerta"),
+        ("cota_atencao_cm", "atencao", "pico atinge a cota de atenção"),
+    ):
+        limiar = (cotas_oficiais or {}).get(campo)
+        if limiar is not None and not pd.isna(limiar) and pico_projetado >= limiar:
+            return classe, rotulo
+
+    if cotas_oficiais and any(
+        v is not None and not pd.isna(v) for v in cotas_oficiais.values()
+    ):
+        return "abaixo", "pico abaixo de todas as cotas oficiais"
+
+    if serie_cota is None or len(serie_cota.dropna()) < 50:
+        return "indefinida", "série curta demais para uma régua"
+
+    limpa = serie_cota.dropna()
+    amplitude = float(limpa.quantile(0.95) - limpa.quantile(0.05))
+    if amplitude <= 0:
+        return "indefinida", "rio sem variação na janela"
+
+    fracao = (pico_projetado - cota_atual) / amplitude
+    for corte, nome in FAIXAS_SUBIDA:
+        if fracao >= corte:
+            return f"subida_{nome}", (
+                f"subida {nome} — {fracao * 100:.0f} % da amplitude de 30 dias"
+            )
+    return "estavel", f"variação de {fracao * 100:.0f} % da amplitude de 30 dias"
+
+
+def criar_schema_projecao(db_path: str = CAMINHO_BANCO_PADRAO) -> None:
+    with _conectar(db_path) as con:
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS projecao_cache (
+                id_estacao   TEXT PRIMARY KEY,
+                calculado_em TEXT,
+                cota_atual_cm         REAL,
+                pico_projetado_cm     REAL,
+                variacao_cm           REAL,
+                tc_horas              REAL,
+                horizonte_util_horas  REAL,
+                confiavel             INTEGER,
+                origem_projecao       TEXT,
+                tendencia             TEXT,
+                classe                TEXT,
+                motivo                TEXT,
+                horas_ate_inundacao   REAL
+            )
+            """
+        )
+
+
+def atualizar_projecoes(
+    db_path: str = CAMINHO_BANCO_PADRAO,
+    cn_base: float = CN_PADRAO,
+    verboso: bool = False,
+) -> pd.DataFrame:
+    """Projeta todas as estações analisáveis e grava o resultado.
+
+    Roda fora da interação — pela CLI (`--projetar`) ou pelo coletor. O painel
+    só lê. Estação que falha é registrada com classe `indefinida` em vez de
+    derrubar a rodada inteira: uma fonte com CSV corrompido não pode apagar as
+    outras 58 do mapa.
+    """
+    criar_schema_projecao(db_path)
+    elegiveis = estacoes_analisaveis(db_path)
+    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    linhas = []
+
+    for n, r in enumerate(elegiveis.itertuples(), start=1):
+        registro = {
+            "id_estacao": r.id, "calculado_em": agora,
+            "cota_atual_cm": None, "pico_projetado_cm": None, "variacao_cm": None,
+            "tc_horas": None, "horizonte_util_horas": None, "confiavel": 0,
+            "origem_projecao": None, "tendencia": None,
+            "classe": "indefinida", "motivo": "não calculada",
+            "horas_ate_inundacao": None,
+        }
+        try:
+            res = estimar_tempo_e_impacto_inundacao(r.id, db_path=db_path, cn_base=cn_base)
+            serie = carregar_series_alinhadas(r.id, db_path=db_path)
+            classe, motivo = _classificar_subida(
+                res.get("cota_atual_cm"), res.get("cota_maxima_projetada_cm"),
+                serie["cota_cm"] if serie is not None and not serie.empty else None,
+                {
+                    "cota_atencao_cm": r.cota_atencao_cm,
+                    "cota_alerta_cm": r.cota_alerta_cm,
+                    "cota_inundacao_cm": r.cota_inundacao_cm,
+                },
+            )
+            atual, pico = res.get("cota_atual_cm"), res.get("cota_maxima_projetada_cm")
+            registro.update({
+                "cota_atual_cm": atual,
+                "pico_projetado_cm": pico,
+                "variacao_cm": None if atual is None or pico is None else pico - atual,
+                "tc_horas": res.get("tc_horas"),
+                "horizonte_util_horas": res.get("horizonte_util_horas"),
+                "confiavel": int(bool(res.get("confiavel"))),
+                "origem_projecao": res.get("origem_projecao"),
+                "tendencia": res.get("tendencia"),
+                "classe": classe, "motivo": motivo,
+                "horas_ate_inundacao": res.get("tempo_horas_ate_inundacao"),
+            })
+        except Exception as erro:
+            registro["motivo"] = f"falhou: {type(erro).__name__}"
+
+        linhas.append(registro)
+        if verboso:
+            print(f"  [{n:>3}/{len(elegiveis)}] {r.nome[:26]:28s} "
+                  f"{registro['classe']:16s} {registro['motivo']}")
+
+    tabela = pd.DataFrame(linhas)
+    with _conectar(db_path) as con:
+        con.executemany(
+            "INSERT OR REPLACE INTO projecao_cache VALUES "
+            "(:id_estacao,:calculado_em,:cota_atual_cm,:pico_projetado_cm,"
+            ":variacao_cm,:tc_horas,:horizonte_util_horas,:confiavel,"
+            ":origem_projecao,:tendencia,:classe,:motivo,:horas_ate_inundacao)",
+            linhas,
+        )
+    return tabela
+
+
+def carregar_projecoes(db_path: str = CAMINHO_BANCO_PADRAO) -> pd.DataFrame:
+    """Cache de projeções. Vazio (sem erro) quando ainda não foi calculado."""
+    criar_schema_projecao(db_path)
+    with _conectar(db_path) as con:
+        return pd.read_sql_query("SELECT * FROM projecao_cache", con)
+
+
+# -----------------------------------------------------------------------------
 # EXECUÇÃO DIRETA — diagnóstico rápido
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -2099,9 +2269,26 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Análise hidrológica GeoRisk-RS.")
     ap.add_argument("estacao", nargs="?", help="id da estação (ex.: SACE_taquari_2)")
     ap.add_argument("--listar", action="store_true", help="listar estações analisáveis")
+    ap.add_argument("--projetar", action="store_true",
+                    help="projetar todas as estações e gravar o cache do mapa")
+    ap.add_argument("--exportar", metavar="CSV",
+                    help="com --projetar, grava também o resultado neste CSV")
     ap.add_argument("--banco", default=CAMINHO_BANCO_PADRAO)
     ap.add_argument("--cn", type=float, default=CN_PADRAO)
     args = ap.parse_args()
+
+    if args.projetar:
+        print("Projetando todas as estações analisáveis (~1,2 s cada)…")
+        tabela = atualizar_projecoes(args.banco, cn_base=args.cn, verboso=True)
+        contagem = tabela["classe"].value_counts()
+        print("\nResumo:")
+        for classe, n in contagem.items():
+            print(f"  {n:>3}  {classe}")
+        if args.exportar:
+            Path(args.exportar).parent.mkdir(parents=True, exist_ok=True)
+            tabela.to_csv(args.exportar, index=False, encoding="utf-8")
+            print(f"\nCSV gravado em {args.exportar}")
+        raise SystemExit(0)
 
     if args.listar or not args.estacao:
         tabela = estacoes_analisaveis(args.banco)
