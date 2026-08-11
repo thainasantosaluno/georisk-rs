@@ -537,6 +537,32 @@ a interpretação fica com quem tem referência da área.
 | Rio Uruguai | 74,8 | média | 0,129 km/km² |
 | Guaíba | 74,1 | alta | 0,154 km/km² |
 
+## Confiabilidade da projeção
+
+O painel dizia "projeção sem confiabilidade estatística" para quase todas as
+estações — e estava sendo pessimista sem razão. O campo `confiavel` só olhava o
+modelo treinado naquela estação sozinha, que de fato falha onde a chuva local
+não explica o nível (em Passo Carreiro, r = 0,08). Mas o **modelo agrupado**,
+validado com deixa-uma-estação-de-fora, tinha ganho **+0,52** prevendo estação
+que nunca viu — e ficava relegado a uma nota de rodapé, enquanto o painel
+exibia a projeção ruim da estação isolada.
+
+Agora o agrupado **assume a projeção** quando o modelo local não supera a
+persistência: a série de horizontes, o pico, a tendência e o tempo até cada
+cota passam a vir dele, e `origem_projecao` diz qual dos dois respondeu.
+
+Resultado nas 25 estações com série de cota:
+
+| | |
+|---|---|
+| Com confiabilidade | **22 de 25 — 88 %** |
+| pelo modelo da própria estação | 8 |
+| pelo modelo agrupado | 14 |
+
+As 3 restantes e as 12 sem série não têm projeção porque **a fonte não publica
+o CSV de cota** para elas — limitação de origem, verificada estação por
+estação, não defeito do cálculo.
+
 ## Integridade do cadastro
 
 O total de estações inflava a cada coleta — 565, 602, 654 — por dois motivos

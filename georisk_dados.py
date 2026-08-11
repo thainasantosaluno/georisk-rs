@@ -1091,10 +1091,21 @@ def sincronizar(
     # tem dado; havendo empate, com a da bacia específica, que é a que carrega
     # as cotas oficiais.
     def _peso(est: dict) -> tuple:
+        # A SÉRIE vem primeiro no desempate.
+        #
+        # Sem isso o critério errava: Muçum ficou com a cópia do Guaíba, que
+        # não tem CSV de série, enquanto a do Taquari — com 2.801 pontos de
+        # cota — foi descartada. A estação sumia do módulo hidrológico
+        # inteiro, sem hidrograma nem projeção, embora o dado existisse.
+        #
+        # Nível e cota podem faltar por falha momentânea do relatório; a
+        # presença da série é o sinal mais estável de qual cópia é a útil.
+        serie = est.get("_serie_cota")
+        tem_serie = serie is not None and len(serie) > 0
         tem_nivel = est.get("nivel_cm") is not None
         tem_cota = est.get("cota_inundacao_cm") is not None
         especifica = "guaiba" not in str(est.get("id", ""))
-        return (tem_nivel, tem_cota, especifica)
+        return (tem_serie, tem_nivel, tem_cota, especifica)
 
     unicas: list[dict] = []
     for cand in sorted(sace, key=_peso, reverse=True):

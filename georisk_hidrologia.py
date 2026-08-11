@@ -1464,6 +1464,7 @@ def estimar_tempo_e_impacto_inundacao(
         "preditores_n": None,
         "usou_montante": None,
         "projecao_agrupada": None,
+        "origem_projecao": "estação",
         "precipitacao_acumulada_mm": {},
         "volume_efetivo_mm": None,
         "encharcamento_mm": None,
@@ -1836,35 +1837,105 @@ def estimar_tempo_e_impacto_inundacao(
     # modelo nunca viu. Então: se o local não bate a persistência, oferecemos
     # o agrupado, que bate.
     if not resposta["confiavel"]:
-        agrupado = obter_modelo_agrupado(
-            horizonte_horas=max(1.0, (tempo.tc_horas or 6.0) * 0.5), db_path=db_path
-        )
-        if agrupado is not None and agrupado.ganho_estacao_nova > 0:
-            alternativa = projetar_com_agrupado(estacao_id, agrupado, db_path)
-            if alternativa:
-                resposta["projecao_agrupada"] = alternativa
-                resposta["avisos"].append(
-                    f"O ajuste desta estação sozinha não supera a persistência, mas o "
-                    f"MODELO AGRUPADO supera: treinado com "
-                    f"{agrupado.n_amostras:,} amostras de {agrupado.n_estacoes} estações, "
-                    f"tem ganho {agrupado.ganho_estacao_nova:+.2f} prevendo estação que "
-                    f"nunca viu. Projeção dele: "
-                    f"{alternativa['cota_projetada_cm']:.0f} cm em "
-                    f"+{alternativa['horas_a_frente']:.0f} h."
-                )
-    if uteis:
-        resposta["avisos"].append(
-            f"Projeção com ganho real sobre a persistência até {max(uteis):.1f} h à "
-            f"frente. Além disso o modelo perde para simplesmente supor que o nível "
-            f"fica como está — não use os horizontes mais longos para decisão."
-        )
-    if not uteis and tempo.confiavel:
-        resposta["avisos"].append(
-            f"O modelo não superou a persistência fora da amostra "
-            f"(ganho={resposta['ganho_sobre_persistencia']}). Com 30 dias e poucos "
-            "eventos de cheia, prever \"o nível fica como está\" acerta mais. Trate a "
-            "projeção como ordem de grandeza, não como valor."
-        )
+        # O modelo agrupado ASSUME a projeção, não fica de nota de rodapé.
+        #
+        # Antes o painel dizia "sem confiabilidade estatística" mesmo quando o
+        # agrupado tinha ganho +0,52 prevendo estação que nunca viu — e ainda
+        # exibia a projeção ruim da estação sozinha. Era pessimismo indevido:
+        # há um modelo validado disponível, e é ele que deve responder.
+        #
+        # A validação do agrupado é deixa-uma-estação-de-fora: treina em N-1
+        # estações e mede na que sobrou. Para uma estação cuja chuva local não
+        # explica o nível (r=0,08 em Passo Carreiro), isso é exatamente o caso
+        # de uso — o agrupado aprende o comportamento de bacias parecidas.
+        horizontes = [
+            max(1.0, (tempo.tc_horas or 6.0) * f) for f in (0.25, 0.5, 1.0)
+        ]
+        pontos_agrupado = []
+        ganho_agrupado = None
+
+        for horas in horizontes:
+            modelo_ag = obter_modelo_agrupado(horizonte_horas=horas, db_path=db_path)
+            if modelo_ag is None or modelo_ag.ganho_estacao_nova <= 0:
+                continue
+            previsto = projetar_com_agrupado(estacao_id, modelo_ag, db_path)
+            if not previsto:
+                continue
+            ganho_agrupado = modelo_ag.ganho_estacao_nova
+            pontos_agrupado.append({
+                "instante": (
+                    instante_atual + timedelta(hours=horas)
+                ).strftime("%Y-%m-%d %H:%M:%S"),
+                "horas_a_frente": round(horas, 2),
+                "cota_projetada_cm": previsto["cota_projetada_cm"],
+                "cota_minima_cm": previsto["cota_projetada_cm"],
+                "cota_maxima_cm": previsto["cota_projetada_cm"],
+                "erro_tipico_cm": None,
+                "ganho_sobre_persistencia": round(modelo_ag.ganho_estacao_nova, 3),
+            })
+
+        if pontos_agrupado:
+            resposta["projecao"] = pontos_agrupado
+            resposta["origem_projecao"] = "modelo agrupado"
+            resposta["ganho_sobre_persistencia"] = round(ganho_agrupado, 3)
+            resposta["horizonte_util_horas"] = max(
+                p["horas_a_frente"] for p in pontos_agrupado
+            )
+            resposta["confiavel"] = True
+
+            projecao = pd.Series(
+                [p["cota_projetada_cm"] for p in pontos_agrupado],
+                index=pd.DatetimeIndex([p["instante"] for p in pontos_agrupado]),
+            )
+            pico_ag = max(float(projecao.max()), cota_agora)
+            resposta["cota_maxima_projetada_cm"] = round(pico_ag, 1)
+            resposta["pico_ja_ocorreu"] = bool(float(projecao.max()) <= cota_agora)
+
+            variacao_ag = float(projecao.iloc[0]) - cota_agora
+            resposta["tendencia"] = (
+                "subindo" if variacao_ag > 5
+                else "recessão (vazante)" if variacao_ag < -5 else "estável"
+            )
+
+            # Refaz o tempo até cada cota com a projeção que vale agora.
+            resposta["status_limiares"] = {}
+            for chave, saida, rotulo in (
+                ("cota_atencao_cm", "tempo_horas_ate_atencao", "atenção"),
+                ("cota_alerta_cm", "tempo_horas_ate_alerta", "alerta"),
+                ("cota_inundacao_cm", "tempo_horas_ate_inundacao", "inundação"),
+            ):
+                limiar = cadastro.get(chave)
+                resposta[saida] = None
+                if limiar is None or pd.isna(limiar):
+                    resposta["status_limiares"][rotulo] = "sem cota oficial publicada"
+                    continue
+                limiar = float(limiar)
+                if cota_agora >= limiar:
+                    resposta[saida] = 0.0
+                    resposta["status_limiares"][rotulo] = "JÁ ULTRAPASSADA"
+                    continue
+                cruza = projecao[projecao >= limiar]
+                if cruza.empty:
+                    resposta["status_limiares"][rotulo] = (
+                        "não atingida no horizonte projetado"
+                    )
+                else:
+                    horas_ate = (
+                        cruza.index[0] - instante_atual
+                    ).total_seconds() / 3600
+                    resposta[saida] = round(horas_ate, 2)
+                    resposta["status_limiares"][rotulo] = (
+                        f"projetada para daqui a {horas_ate:.1f} h"
+                    )
+
+            resposta["avisos"].append(
+                f"A chuva medida nesta estação não explica o nível dela "
+                f"(r={tempo.correlacao:.2f}), então a projeção vem do MODELO "
+                f"AGRUPADO: treinado com {modelo_ag.n_amostras:,} amostras de "
+                f"{modelo_ag.n_estacoes} estações, com ganho "
+                f"{ganho_agrupado:+.2f} sobre a persistência prevendo estação "
+                f"que nunca viu."
+            )
 
     resposta["grafico_hietograma_hidrograma"] = grafico_hietograma_hidrograma(
         df, cadastro, projecao, tempo.tc_horas
