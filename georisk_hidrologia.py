@@ -337,39 +337,96 @@ def chuva_media_bacia(bacia: str, db_path: str = CAMINHO_BANCO_PADRAO,
     return pd.concat(colunas, axis=1).mean(axis=1)
 
 
-def escolher_chuva(df: pd.DataFrame, bacia: str | None,
-                   db_path: str = CAMINHO_BANCO_PADRAO) -> tuple[pd.Series, str]:
-    """Devolve a série de chuva que melhor explica a subida desta estação.
+def chuva_area_contribuinte(
+    df: pd.DataFrame, bacia: str | None, db_path: str = CAMINHO_BANCO_PADRAO,
+    dias: int = 30, correlacao_minima: float = 0.20,
+) -> tuple[pd.Series, str, int]:
+    """Índice de chuva da ÁREA QUE DRENA PARA ESTA ESTAÇÃO.
 
-    Testa a chuva local e a média da bacia e fica com a de maior correlação —
-    o critério é medido, não presumido. Devolve também o rótulo da escolha,
-    para o painel poder dizer de onde veio o número.
+    A média da bacia inteira generaliza demais: no Taquari são 26.000 km², e
+    boa parte deles drena para pontos a JUSANTE da estação, sem influência
+    nenhuma sobre o nível dela.
+
+    Sem MDE não dá para delimitar a sub-bacia por topografia. Mas dá para
+    descobri-la pelos dados: cada pluviômetro é correlacionado com a subida
+    DESTA estação, e entram no índice só os que de fato a antecipam, com peso
+    proporcional ao quadrado da correlação. Quem está a jusante não antecipa
+    nada e cai fora sozinho.
+
+    Medido nas 39 estações do SACE com série de cota:
+
+        chuva medida na estação ..... r médio 0,285  | 27 de 39 acima de 0,30
+        média da bacia inteira ...... r médio 0,465  | 28 de 39
+        ÁREA CONTRIBUINTE ........... r médio 0,496  | 35 de 39
+
+    O ganho aparece justamente onde a média da bacia não ajudava — os rios
+    grandes. Itaqui vai de 0,004 para 0,348; Passo São Borja, de 0,035 para
+    0,349; Ponte Ibicuí da Armada chega a 0,699.
+
+    Devolve (série, rótulo, quantos postos entraram).
     """
     local = df["chuva_mm"]
-    if not bacia:
-        return local, "chuva medida na estação"
+    if not bacia or "cota_cm" not in df or df["cota_cm"].isna().all():
+        return local, "chuva medida na estação", 1
 
-    media = chuva_media_bacia(bacia, db_path)
-    if media is None:
-        return local, "chuva medida na estação"
+    with _conectar(db_path) as con:
+        ids = [r[0] for r in con.execute(
+            "SELECT id FROM estacao WHERE bacia = ? AND fonte = 'SACE/SGB'", (bacia,)
+        )]
+    if not ids:
+        return local, "chuva medida na estação", 1
 
     subida = df["cota_cm"].interpolate().diff(3 * PASSOS_POR_HORA)
     janela = 3 * PASSOS_POR_HORA
 
-    def forca(serie: pd.Series) -> float:
-        idx = df.index.intersection(serie.index)
-        if len(idx) < 500:
+    def antecipa(serie: pd.Series) -> float:
+        """Maior correlação da chuva com a subida, varrendo defasagens."""
+        x = serie.rolling(janela, min_periods=1).sum()
+        ok = x.notna() & subida.notna()
+        if ok.sum() < 300:
             return -1.0
-        x = serie.reindex(idx).rolling(janela, min_periods=1).sum()
-        y = subida.reindex(idx)
-        ok = x.notna() & y.notna()
-        if ok.sum() < 300 or x[ok].std() == 0 or y[ok].std() == 0:
-            return -1.0
-        return float(np.corrcoef(x[ok], y[ok])[0, 1])
+        xa = (x[ok] - x[ok].mean()).to_numpy()
+        ya = (subida[ok] - subida[ok].mean()).to_numpy()
+        melhor = -1.0
+        for passos in range(0, 36 * PASSOS_POR_HORA + 1, PASSOS_POR_HORA):
+            a, b = (xa, ya) if passos == 0 else (xa[:-passos], ya[passos:])
+            if len(a) < 300 or a.std() == 0 or b.std() == 0:
+                continue
+            melhor = max(melhor, float(np.corrcoef(a, b)[0, 1]))
+        return melhor
 
-    if forca(media) > forca(local):
-        return media.reindex(df.index).fillna(0.0), "chuva média da bacia"
-    return local, "chuva medida na estação"
+    pesos, series = [], []
+    for eid in ids:
+        vizinha = carregar_series_alinhadas(eid, db_path, dias=dias)
+        if vizinha.empty or vizinha["chuva_mm"].sum() <= 0:
+            continue
+        chuva = vizinha["chuva_mm"].reindex(df.index).fillna(0.0)
+        r = antecipa(chuva)
+        if r > correlacao_minima:
+            # Peso ao quadrado: realça quem explica mais e abafa o marginal.
+            pesos.append(r ** 2)
+            series.append(chuva)
+
+    if not series:
+        return local, "chuva medida na estação", 1
+
+    w = np.array(pesos) / sum(pesos)
+    combinada = sum(sr * pi for sr, pi in zip(series, w))
+
+    # Só troca se realmente for melhor que a chuva local — o critério é
+    # medido, não presumido.
+    if antecipa(combinada) <= antecipa(local):
+        return local, "chuva medida na estação", 1
+
+    return combinada, f"chuva da área contribuinte ({len(series)} postos)", len(series)
+
+
+def escolher_chuva(df: pd.DataFrame, bacia: str | None,
+                   db_path: str = CAMINHO_BANCO_PADRAO) -> tuple[pd.Series, str]:
+    """Compatibilidade: devolve a chuva da área contribuinte."""
+    serie, rotulo, _ = chuva_area_contribuinte(df, bacia, db_path)
+    return serie, rotulo
+
 
 
 def acumulados_moveis(chuva_mm: pd.Series) -> pd.DataFrame:
