@@ -59,6 +59,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from contextlib import contextmanager
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -241,6 +242,14 @@ def criar_schema_geo(db_path: str = CAMINHO_BANCO_PADRAO) -> None:
                 bacia        TEXT PRIMARY KEY,
                 dados        TEXT,   -- JSON: litologia, estruturas, geomorfologia
                 calculado_em TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS area_drenagem (
+                id_estacao   TEXT PRIMARY KEY,
+                codigo_ana   TEXT,
+                area_km2     REAL,
+                casamento    TEXT,   -- como o código foi casado com o da ANA
+                obtido_em    TEXT
             );
 
             CREATE INDEX IF NOT EXISTS ix_mancha_mun ON mancha_oficial (municipio, cota_cm);
@@ -914,9 +923,18 @@ def preparar_tudo(db_path: str = CAMINHO_BANCO_PADRAO, progresso=None) -> dict:
             caracterizadas[bacia] = None
             avisar(base, f"Caracterização de {bacia} falhou: {type(exc).__name__}")
 
+    avisar(0.97, "Buscando a área de drenagem de cada estação…")
+    try:
+        areas = atualizar_areas_drenagem(db_path)
+        n_areas = int(areas["area_km2"].notna().sum())
+    except Exception as exc:
+        n_areas = 0
+        avisar(0.97, f"Áreas de drenagem falharam: {type(exc).__name__}")
+
     avisar(1.0, "Camada geoespacial pronta.")
     return {"manchas_sgb_novas": n_sgb, "manchas_defesa_civil_novas": n_dc,
-            "cn_por_bacia": cns, "densidade_drenagem_por_bacia": caracterizadas}
+            "cn_por_bacia": cns, "densidade_drenagem_por_bacia": caracterizadas,
+            "estacoes_com_area_drenagem": n_areas}
 
 
 # -----------------------------------------------------------------------------
@@ -1541,6 +1559,131 @@ def faixas_de_incerteza(
                         "geometry": mapping(poligono)},
         })
     return saida
+
+
+# -----------------------------------------------------------------------------
+# ÁREA DE DRENAGEM POR ESTAÇÃO
+# -----------------------------------------------------------------------------
+# O modelo agrupado usava a área da BACIA como preditor: 26.315 km² para toda
+# estação do Taquari-Antas, de Santa Tereza a Estrela. Dentro de uma bacia a
+# variável era constante, e não distinguia cabeceira de foz — justamente a
+# distinção que ela deveria trazer.
+#
+# O inventário aberto do SNIRH publica `AreaDrenagem` por estação. Santa Tereza
+# não drena os mesmos 26 mil km² que Estrela, e agora o modelo sabe disso.
+
+SERVICO_ESTACOES_ANA = (
+    "https://portal1.snirh.gov.br/server/rest/services/"
+    "Esta%C3%A7%C3%B5es_Hidrometeorol%C3%B3gicas_SNIRH/FeatureServer/0/query"
+)
+
+
+def _inventario_area_ana(uf: str = "RIO GRANDE DO SUL") -> dict[str, float]:
+    """`{codigo sem zeros à esquerda: área km²}` do inventário aberto da ANA."""
+    import requests
+
+    mapa: dict[str, float] = {}
+    deslocamento = 0
+    while True:
+        # O serviço devolve página HTML de erro em vez de JSON de vez em
+        # quando. Sem repetição, uma falha no meio da paginação derrubava a
+        # coleta inteira e deixava metade das estações sem área.
+        feicoes = None
+        for tentativa in range(3):
+            try:
+                resposta = requests.get(
+                    SERVICO_ESTACOES_ANA,
+                    params={
+                        "where": f"UF='{uf}' AND AreaDrenagem>0",
+                        "outFields": "Codigo,AreaDrenagem",
+                        "returnGeometry": "false", "f": "json",
+                        "resultOffset": deslocamento, "resultRecordCount": 1000,
+                    },
+                    timeout=180, verify=False,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                feicoes = resposta.json().get("features", [])
+                break
+            except Exception:
+                if tentativa == 2:
+                    feicoes = None
+                else:
+                    time.sleep(2 * (tentativa + 1))
+
+        if not feicoes:
+            break
+        for f in feicoes:
+            a = f["attributes"]
+            mapa[str(a["Codigo"]).lstrip("0")] = float(a["AreaDrenagem"])
+        deslocamento += len(feicoes)
+        if len(feicoes) < 1000:
+            break
+    return mapa
+
+
+def _casar_codigo(codigo, mapa: dict[str, float]) -> tuple[float | None, str]:
+    """Casa o código da estação com o do inventário da ANA.
+
+    O mesmo posto aparece com 7 ou 8 dígitos conforme a fonte — Santa Tereza é
+    `8647260` no SACE e `86472600` na ANA. Sem tolerar o zero final, 28 das 48
+    estações que têm área ficariam de fora.
+    """
+    if codigo is None or (isinstance(codigo, float) and pd.isna(codigo)):
+        return None, "sem código"
+    c = str(codigo).strip().lstrip("0")
+    if not c:
+        return None, "sem código"
+    if c in mapa:
+        return mapa[c], "exato"
+    if c + "0" in mapa:
+        return mapa[c + "0"], "faltava um zero"
+    if c.endswith("0") and c[:-1] in mapa:
+        return mapa[c[:-1]], "zero a mais"
+    return None, "sem par no inventário"
+
+
+def atualizar_areas_drenagem(db_path: str = CAMINHO_BANCO_PADRAO) -> pd.DataFrame:
+    """Busca a área de drenagem de cada estação e grava na tabela local."""
+    criar_schema_geo(db_path)
+    mapa = _inventario_area_ana()
+
+    with _conectar(db_path) as con:
+        estacoes = pd.read_sql_query("SELECT id, nome, codigo FROM estacao", con)
+
+    linhas = []
+    for r in estacoes.itertuples():
+        area, como = _casar_codigo(r.codigo, mapa)
+        linhas.append({
+            "id_estacao": r.id, "codigo_ana": str(r.codigo),
+            "area_km2": area, "casamento": como, "obtido_em": _agora(),
+        })
+
+    with _conectar(db_path) as con:
+        con.executemany(
+            "INSERT OR REPLACE INTO area_drenagem "
+            "(id_estacao, codigo_ana, area_km2, casamento, obtido_em) "
+            "VALUES (:id_estacao,:codigo_ana,:area_km2,:casamento,:obtido_em)",
+            linhas,
+        )
+    return pd.DataFrame(linhas)
+
+
+def area_da_estacao(estacao_id: str, db_path: str = CAMINHO_BANCO_PADRAO) -> float | None:
+    """Área de drenagem da estação, ou None se a ANA não publica para ela.
+
+    É o gancho que `georisk_hidrologia` usa: havendo área por estação, ela
+    substitui a da bacia; não havendo, o comportamento antigo continua.
+    """
+    try:
+        criar_schema_geo(db_path)
+        with _conectar(db_path) as con:
+            linha = con.execute(
+                "SELECT area_km2 FROM area_drenagem WHERE id_estacao = ?",
+                (estacao_id,),
+            ).fetchone()
+    except Exception:
+        return None
+    return float(linha[0]) if linha and linha[0] else None
 
 
 if __name__ == "__main__":

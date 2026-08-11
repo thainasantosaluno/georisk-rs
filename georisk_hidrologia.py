@@ -1256,6 +1256,7 @@ def _amostras_da_estacao(
         d[f"p{horas}h"] = acumulados[f"p{horas}h"]
 
     # --- Condicionantes da bacia (constantes aqui, variáveis entre estações)
+    area_estacao = None
     try:
         import georisk_geo as gg
         cn = gg.cn_da_bacia(estacao.get("bacia"), db_path)
@@ -1264,6 +1265,7 @@ def _amostras_da_estacao(
              if gg._normalizar(c["nome"]) == gg._normalizar(estacao.get("bacia"))),
             None,
         )
+        area_estacao = gg.area_da_estacao(estacao["id"], db_path)
     except Exception:
         cn, carac = None, None
 
@@ -1273,9 +1275,20 @@ def _amostras_da_estacao(
             carac["geomorfologia"]["densidade_dominante"], 3
         )
         d["lineamentos"] = carac.get("densidade_lineamentos_km_km2", 0.0)
+    else:
+        d["dens_drenagem"], d["lineamentos"] = 3, 0.0
+
+    # Área DRENADA PELA ESTAÇÃO, não pela bacia. Com a área da bacia esta
+    # coluna era constante dentro de cada bacia — 26.315 km² tanto para Passo
+    # Tainhas, que drena 1.120, quanto para Taquari, que drena 25.900 — e não
+    # distinguia cabeceira de foz, que é justamente o que ela deveria trazer.
+    # A ANA publica a área por estação; onde ela falta, cai na da bacia.
+    if area_estacao:
+        d["log_area"] = np.log10(max(area_estacao, 1.0))
+    elif carac:
         d["log_area"] = np.log10(max(carac.get("area_km2", 1.0), 1.0))
     else:
-        d["dens_drenagem"], d["lineamentos"], d["log_area"] = 3, 0.0, 3.0
+        d["log_area"] = 3.0
 
     d["_alvo"] = d["h_rel"].shift(-passos_adiante) - d["h_rel"]
     d["_estacao"] = estacao["id"]

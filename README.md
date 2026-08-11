@@ -41,9 +41,39 @@ de receberem um limiar arbitrado. **Elas continuam tendo projeção** de quanto 
 rio sobe e em quanto tempo — o que falta é só a tradução disso em nível de
 alerta, que depende de um valor que a fonte não abre.
 
-Achado lateral aproveitável: o ArcGIS aberto traz `AreaDrenagem` **por estação**,
-mais preciso que a área da bacia inteira que o modelo agrupado usa hoje em
-`log_area`.
+### Área de drenagem por estação — o achado aproveitado
+
+O inventário aberto do SNIRH publica `AreaDrenagem` **por estação**, e o modelo
+agrupado usava a área da BACIA: 26.315 km² para toda estação do Taquari-Antas.
+A variável era constante dentro de cada bacia e não distinguia cabeceira de foz
+— exatamente o que ela deveria trazer. As áreas reais:
+
+| Estação | Área drenada |
+|---|---|
+| Passo Tainhas | 1.120 km² |
+| Passo Carreiro | 1.820 km² |
+| Muçum | 16.000 km² |
+| Encantado | 19.100 km² |
+| Estrela | 22.472 km² |
+| Taquari | 25.900 km² |
+
+A ordenação bate com a cascata montante→jusante já validada pelo Tc. **48 das 59
+estações analisáveis** casaram (365 exatas e 33 tolerando o zero final — o mesmo
+posto é `8647260` no SACE e `86472600` na ANA).
+
+O ganho medido é pequeno e cresce com o horizonte:
+
+| Horizonte | Área da bacia | Área da estação | Variação |
+|---|---|---|---|
+| 3 h | +0,5045 | +0,5054 | +0,0009 |
+| 6 h | +0,4459 | +0,4477 | +0,0018 |
+| 12 h | +0,3788 | +0,3834 | +0,0046 |
+| 24 h | +0,3129 | +0,3235 | **+0,0106** |
+
+Marginal em valor absoluto, mas monotônico e na direção certa — o tempo de
+propagação escala com o tamanho da bacia, então a área pesar mais no horizonte
+longo é o comportamento esperado. Mantida por ser a variável correta, não por
+mover o placar.
 
 ## Arquivos
 
