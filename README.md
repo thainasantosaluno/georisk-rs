@@ -348,6 +348,36 @@ A mesma chuva, cem vezes mais escoamento. `avaliar_vulnerabilidade()` continua
 disponível para consulta por código — `resposta["vulnerabilidade"]` traz grau de
 saturação, horas até dessaturar e simulações — mas nada disso vai para a tela.
 
+### A seleção decide durante o evento, não antes
+
+O conjunto de preditores **não é fixo**. Ele é reescolhido a cada estimativa,
+testando seis candidatos fora da amostra. A prova de que isso responde ao evento
+em tempo real: travando o modelo em três instantes da cheia de julho de 2026 com
+`ate_instante`, sem deixá-lo ver nada do futuro.
+
+| instante | API | cota Estrela | conjunto escolhido |
+|---|---|---|---|
+| 20/07 12 h | 35 mm | 1.302 cm | somente cota |
+| 21/07 12 h | 64 mm | 1.339 cm | somente cota |
+| 22/07 12 h | **95 mm** | 2.270 cm | **cota + chuva + CN + montante** |
+
+Nas quatro estações do Taquari testadas (Estrela, Encantado, Muçum, Bom Retiro
+do Sul) o bloco de chuva + CN entrou **sozinho** no dia 22, quando o solo
+saturou. Em Bom Retiro o encharcamento entrou até como variável explícita. No
+dia 20, solo seco, o mesmo código havia descartado tudo isso.
+
+Hoje, fora de evento, o API está em 33–52 mm nas 22 estações — praticamente
+constante. Variável sem variância não explica nada, e a validação corretamente a
+descarta: o bloco de chuva + CN vence em 9 das 22. Não é o método falhando, é
+ele se recusando a usar informação que no momento não existe.
+
+**O solo age mesmo quando não aparece na lista.** O API alimenta
+`_ajustar_cn_por_umidade(cn_base, p72_mm, api_mm)`, que é chamada dentro de
+`calcular_chuva_efetiva`. Quando o conjunto vencedor inclui "CN", a saturação
+**já está** dentro de `pe_mm` — é ela que decide se 68 mm viram 53 % de
+escoamento ou zero. A coluna `encharcamento` separada só entra quando acrescenta
+algo além disso, o que é raro porque durante evento ela é colinear com o p72h.
+
 ### Volume, não só lâmina
 
 Milímetro não diz quanta água é. `mm × km² × 1.000` dá metros cúbicos, grandeza
@@ -665,7 +695,50 @@ O projeto roda sem nenhum aviso: `pyflakes` zerado nos seis módulos, nenhum
 warning de runtime, nenhuma depreciação de biblioteca, e os dois painéis sobem
 sem traceback.
 
-Três correções que valem registro, porque nenhuma delas dava erro visível:
+Mas ausência de erro não é evidência de acerto — as falhas mais graves deste
+projeto nunca produziram traceback. O que segue é o registro do que foi de fato
+medido, contra referência independente sempre que houve uma.
+
+### Registro de validação
+
+| O que | Como foi testado | Resultado |
+|---|---|---|
+| Tempo de concentração | ordenação montante→jusante no Taquari | Sta. Tereza 9,75 h → Muçum 11,5 h → Encantado 12,25 h → Estrela 17 h — **fisicamente coerente** |
+| Tempo de viagem | soma dos trechos vs medição direta Sta. Tereza→Taquari | 13,25 h somado vs **14,25 h medido — 7 %** |
+| Propagação de onda | correlação entre estações vizinhas | **r = 0,58 a 0,81** |
+| Qual chuva comanda | chuva local vs nível de montante, prevendo Estrela | local r = 0,08; montante r = 0,65 — **8× melhor** |
+| Mancha por MDE | 5 cotas contra modelagem hidráulica IPH-UFRGS, Lajeado | média **0,89×** do oficial, dentro de ±35 % |
+| Modelo agrupado | deixa-uma-estação-de-fora | ganho **+0,47 a +0,52** prevendo estação nunca vista |
+| Magnitude projetada | retroteste da cheia de julho, Estrela (pico 2.477 cm) | erros **+154, +103, +28, −8 cm** nos 4 primeiros horizontes |
+| SCS-CN | razão de volume efetivo cheia vs estiagem | **44×**, contra 12× da chuva bruta |
+| Acumulado de chuva | contra o valor de 24 h publicado pelo próprio SACE | **bate exato** |
+| Seleção de preditores | travada em 3 instantes do evento com `ate_instante` | mudou sozinha em **4 de 4 estações** ao saturar |
+| Cobertura de projeção | 25 estações com série de cota | **22 confiáveis (88 %)** |
+
+### Erros silenciosos corrigidos
+
+Nenhum destes gerava exceção. Todos produziam número errado com aparência de
+número certo — que é a falha perigosa num sistema de decisão.
+
+| Sintoma | Causa | Correção |
+|---|---|---|
+| SACE devolvia zero estação, registrando *0 erros* | SGB trocou `L.marker` por `L.circleMarker`; situação migrou do ícone para a cor | as duas formas aceitas |
+| Chuva de **25.281 mm** em 24 h | o CSV da fonte vinha preenchido com a série de nível | `_chuva_plausivel()` |
+| Cota de **88.130 cm** | CGH/PCH da ANA publicam altitude absoluta, não régua | faixa física por grandeza, descarte registrado em `observacao` |
+| Projeção de **7.781 cm** com o rio em 1.708 | modelo previa nível absoluto e extrapolava | prevê ΔH, recorta no envelope histórico |
+| Mancha **4,72× maior** que a oficial | régua marca zero 18,5 m acima do talvegue | âncora na cota de inundação → 0,89× |
+| "4,31 h até a inundação" com o rio já acima dela | limiar comparado sem checar o sentido | `JÁ ULTRAPASSADA` |
+| Histórico com **16.101 dias** numa janela de 5.844 | três séries por mês somadas como se fossem uma | média diária, 07 h e 17 h separadas |
+| Horizonte útil longo demais | pegava o máximo do ganho, que era ruído na cauda | exige sequência contígua |
+| Calibração sem sinal | usava defasagem de 1 dia onde a resposta é no mesmo dia | defasagem corrigida |
+| Validação cruzada sem sentido | estações do Uruguai validadas com chuva do Taquari | restrita à mesma bacia |
+| Navegador travando | GeoJSON de 44 MB | simplificação 55 m + raio 5 km → **1,1 MB** |
+| Painel bloqueado 30 s | modo envelope carregava tudo antes de abrir | padrão no modo rápido |
+| Valor nulo virando padrão | `valor or padrao` — NaN é verdadeiro em Python | helpers `_ou()`/`ou()` com `pd.isna` |
+| Painéis divergindo entre si | 7 funções duplicadas, 58 linhas já diferentes | extraídas para `georisk_mapa.py` |
+| Contagem de estações inflando | chave instável + duplicata entre bacias + órfãs | 565 → 602 → 654 → **551 estáveis** |
+
+Três merecem o detalhe, porque explicam decisões de arquitetura:
 
 **A fonte mudou e o coletor calou.** Em agosto de 2026 o SGB trocou o desenho
 das estações de `L.marker([lat, lon], {icon: NomeDoStatus})` para
@@ -686,6 +759,54 @@ transmitir tem `nivel_cm` nulo — o que está certo, não há leitura atual —
 boletim escrevia "Sem dado" logo acima da série com centenas de pontos. Agora
 mostra a última leitura conhecida e há quanto tempo ela foi: três dias sem
 transmitir é problema de sensor, não ausência de histórico.
+
+## Validade para predição
+
+O que o conjunto autoriza afirmar, separado por pergunta, com o grau de
+sustentação de cada resposta.
+
+| Pergunta | Validade | Base |
+|---|---|---|
+| **Quando** a água chega em cada estação | **Alta** | Tc coerente com a cascata física; tempos de viagem aditivos com 7 % de discrepância; propagação r = 0,58–0,81 |
+| **Quanto** já choveu e quanto escoou | **Alta** — é medição | leitura direta da fonte, acumulado conferido contra o SACE; volume em m³ pelo SCS-CN com CN real por bacia |
+| **Quanto vai subir** | **Média, e só até metade do Tc** | agrupado ganha +0,47/+0,52; erro típico **± 140 cm**; além disso o envelope cobre tudo e a projeção perde para a persistência |
+| **Onde alaga** — 5 municípios | **Alta** | mancha modelada pelo SGB/IPH-UFRGS |
+| **Onde alaga** — onde há cota oficial | **Média** | MDE ancorado, 0,89× do oficial, ±35 % — mas é preenchimento por altura, ignora conectividade hidráulica |
+| **Onde alaga** — resto do estado | **Baixa** | largura proporcional à cota; é parâmetro, não modelo |
+
+### A limitação que atravessa tudo
+
+**Não há previsão meteorológica no sistema.** Tudo é reativo: trabalha com a
+chuva que **já caiu**. Se está chovendo agora, o sistema sabe o acumulado até
+este instante e projeta a resposta do rio a ele — não sabe se vai continuar
+chovendo. O nowcast é extrapolação da taxa recente e está rotulado como tal.
+
+Ampliar o horizonte exigiria acoplar previsão quantitativa de chuva. O INMET não
+devolve leitura sem token e o CEMADEN não publica endpoint aberto — ambos
+registrados em [Fontes](#fontes) com o motivo da recusa.
+
+### O envelope faz parte da resposta
+
+Encantado em 07/08, projeção a partir de 199 cm subindo:
+
+| horizonte | projetado | envelope |
+|---|---|---|
+| 3,1 h | 224 cm | 138 – 311 |
+| 6,1 h | 259 cm | 86 – 433 |
+| 18,4 h | 316 cm | **4 – 629** |
+
+Às 3 h o intervalo é ±87 cm e serve para decidir. Às 18 h vai de "o rio secou" a
+"dobrou" — a projeção continua sendo impressa, e continua não sendo informação.
+O alargamento é comportamento correto: é o modelo dizendo onde parar de confiar
+nele. Por isso o horizonte útil termina na metade do Tc, e por isso o envelope
+nunca é omitido do painel.
+
+### Uma lacuna de dado, não de método
+
+Encantado projeta +118 cm e o SACE **não publica** cota de atenção, alerta nem
+inundação para ela. Sabe-se quanto e quando; não se sabe se é grave. Sem limiar
+não há como converter centímetro em decisão — e isso é limitação da fonte, não
+do cálculo.
 
 ## Aviso
 
