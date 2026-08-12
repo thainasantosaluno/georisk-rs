@@ -438,6 +438,54 @@ def _mapa_sace(bacia: str) -> list[dict]:
     return estacoes
 
 
+RE_ARRAY_JS = re.compile(r"const\s+(labels|valoresCota|valoresChuva)\s*=\s*\[(.*?)\]", re.S)
+
+
+def _serie_da_pagina(html: str) -> dict[str, pd.DataFrame]:
+    """Série de 15 min lida do próprio relatório, e não do CSV.
+
+    POR QUE ESTA FUNÇÃO EXISTE
+    --------------------------
+    Em 07/08/2026 o SACE parou de atualizar `api/dados/<bacia>_<pm>_cota.csv`
+    e não voltou: o arquivo continua respondendo 200, com o mesmo conteúdo de
+    sempre, terminando naquela data. A página do relatório, porém, seguiu
+    fresca — ela desenha o gráfico a partir de arrays embutidos no JS:
+
+        const labels       = ['2026-07-12 21:15:00', …]
+        const valoresCota  = [333.00, …]
+        const valoresChuva = [0.00, …]
+
+    São os mesmos 15 minutos, do mesmo órgão, atualizados. Ler daqui também
+    ECONOMIZA REQUISIÇÕES: o relatório já é baixado para pegar nível e cotas,
+    então as duas séries saem de graça, no lugar de dois CSV por estação.
+
+    Estação pluviométrica traz só `labels` e `valoresChuva` — o que é correto,
+    e o chamador decide o tipo pelo que veio.
+    """
+    achados = {m.group(1): m.group(2) for m in RE_ARRAY_JS.finditer(html)}
+    rotulos = re.findall(r"'([^']+)'", achados.get("labels", ""))
+    if not rotulos:
+        return {}
+
+    saida: dict[str, pd.DataFrame] = {}
+    for chave, grandeza in (("valoresCota", "cota"), ("valoresChuva", "chuva")):
+        if chave not in achados:
+            continue
+        valores = re.findall(r"-?\d+\.?\d*", achados[chave])
+        if len(valores) != len(rotulos):
+            # Desalinhamento é dado corrompido, não série curta: descartar é
+            # mais seguro que casar pelo menor comprimento e deslocar tudo.
+            continue
+        df = pd.DataFrame({
+            "datahora": pd.to_datetime(rotulos, errors="coerce"),
+            "valor": pd.to_numeric(valores, errors="coerce"),
+        }).dropna()
+        df = df[df["valor"] != SENTINELA]
+        if not df.empty:
+            saida[grandeza] = df.sort_values("datahora").reset_index(drop=True)
+    return saida
+
+
 def _relatorio_sace(est: dict) -> dict:
     """Abre o relatório da estação e extrai nível, data/hora, rio e as COTAS
     OFICIAIS. É daqui que sai o limiar de risco — nunca de tabela chutada."""
@@ -483,6 +531,12 @@ def _relatorio_sace(est: dict) -> dict:
         m = padrao.search(html)
         if m:
             dados[chave] = _float(m.group(1))
+
+    # As séries saem da mesma página, sem requisição extra. Ver
+    # `_serie_da_pagina` para por que não vêm mais do CSV.
+    series = _serie_da_pagina(html)
+    if series:
+        dados["_series_da_pagina"] = series
 
     return dados
 
@@ -566,8 +620,17 @@ def coletar_sace(baixar_series: bool = True, trabalhadores: int = 8) -> tuple[li
             erros.append(f"relatorio {est['id']}: {type(exc).__name__}")
         if baixar_series:
             try:
-                cota = _serie_sace(est["_bacia_url"], est["_pm"], "cota")
-                chuva = _serie_sace(est["_bacia_url"], est["_pm"], "chuva")
+                # A página é a fonte primária: o CSV do SACE congelou em
+                # 07/08/2026 e segue respondendo 200 com dado velho, enquanto
+                # o gráfico do relatório continua atualizado. O CSV fica de
+                # reserva para o caso de a página mudar de formato.
+                da_pagina = est.pop("_series_da_pagina", None) or {}
+                cota = da_pagina.get("cota")
+                chuva = da_pagina.get("chuva")
+                if cota is None:
+                    cota = _serie_sace(est["_bacia_url"], est["_pm"], "cota")
+                if chuva is None:
+                    chuva = _serie_sace(est["_bacia_url"], est["_pm"], "chuva")
 
                 if not cota.empty:
                     est["_serie_cota"] = cota
