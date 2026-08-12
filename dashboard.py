@@ -765,6 +765,21 @@ with tab_hidro:
                     "Rode `python georisk_hidrologia.py --projetar` para gerar."
                 )
 
+        # Visão sistêmica: quantas estações têm a série parada. Sem isto, só se
+        # descobre abrindo estação por estação — e foi assim que uma pane de
+        # quatro dias no CSV do SACE passou despercebida.
+        if tem_cache and "confiavel" in cache_proj.columns:
+            n_conf = int(cache_proj["confiavel"].fillna(0).sum())
+            if n_conf == 0:
+                st.warning(
+                    f"**Nenhuma das {len(cache_proj)} estações tem projeção "
+                    f"confiável agora.** A causa principal é a série de 15 min: "
+                    f"o SACE parou de publicá-la, e sem dado novo a projeção "
+                    f"parte de onde a série terminou. Abra uma estação para ver "
+                    f"há quanto tempo a dela parou.",
+                    icon="⚠️",
+                )
+
         def _cor_da_estacao(linha) -> tuple[str, str]:
             if modo_cor == "Leitura atual":
                 return _cor_agora(linha)
@@ -773,6 +788,32 @@ with tab_hidro:
                 return "#9e9e9e", "sem projeção no cache"
             cor, _ = CORES_PROJECAO.get(reg["classe"], CORES_PROJECAO["indefinida"])
             return cor, reg["motivo"]
+
+        def _linha_de_nivel(nivel_cadastro, reg: dict) -> str:
+            """Nível e pico no balão, sem misturar procedência.
+
+            `nivel_cm` é a leitura pontual do cadastro; `cota_atual_cm` do cache
+            é o fim da série, que é de onde a projeção parte. Onde só existe a
+            segunda, é ela que aparece — rotulada — em vez de "Sem dado" ao lado
+            de uma variação que ficaria sem referência.
+            """
+            pico = (reg or {}).get("pico_projetado_cm")
+            ancora = (reg or {}).get("cota_atual_cm")
+            tem_pico = pico is not None and not pd.isna(pico)
+
+            if nivel_cadastro is not None and not pd.isna(nivel_cadastro):
+                base, rotulo = float(nivel_cadastro), "Nível"
+            elif ancora is not None and not pd.isna(ancora):
+                base, rotulo = float(ancora), "Nível (fim da série)"
+            else:
+                return "Nível: Sem dado" + (
+                    f" · pico projetado {texto(pico, ' cm')}" if tem_pico else ""
+                )
+
+            texto_base = f"{rotulo}: {base:.0f} cm"
+            if not tem_pico:
+                return texto_base
+            return f"{texto_base} → pico {float(pico):.0f} cm ({float(pico) - base:+.0f} cm)"
 
         col_mapa, col_lista = st.columns([2.4, 1])
 
@@ -814,11 +855,13 @@ with tab_hidro:
                         f"<b>{linha['nome']}</b><br>"
                         f"{ou(linha.get('municipio'), 'município não informado')} · "
                         f"{ou(linha.get('rio'), 'rio não informado')}<br>"
-                        f"Nível: {texto(linha.get('nivel_cm'), ' cm')}"
-                        + (f" → pico {texto(pico, ' cm')} "
-                           f"({variacao:+.0f} cm)" if pico is not None
-                           and not pd.isna(pico) and variacao is not None
-                           and not pd.isna(variacao) else "")
+                        # O nível vem do cadastro e o pico vem da série, e as
+                        # duas fontes divergem: estação sem leitura pontual
+                        # mostrava "Sem dado → pico 471 cm (+207 cm)", uma
+                        # variação a partir de um nível desconhecido. Quando o
+                        # cadastro não tem leitura, a âncora exibida passa a ser
+                        # a mesma que a projeção usou, e dita como tal.
+                        + _linha_de_nivel(linha.get("nivel_cm"), reg)
                         + f"<br><b>{estado}</b><br>"
                         f"Atenção: {texto(linha.get('cota_atencao_cm'), ' cm')} · "
                         f"Alerta: {texto(linha.get('cota_alerta_cm'), ' cm')} · "
@@ -898,6 +941,19 @@ with tab_hidro:
         aferic = resultado.get("afericao_tc")
         atual_cm = resultado["cota_atual_cm"]
         pico_cm = resultado["cota_maxima_projetada_cm"]
+
+        # Âncora velha primeiro: sem isso, todo número abaixo parece de agora.
+        if resultado.get("ancora_defasada"):
+            st.error(
+                f"**Esta projeção não é de agora.** A série de 15 min desta "
+                f"estação parou em **{resultado['ancora_em']}**, há "
+                f"**{resultado['idade_ancora_horas']:.0f} h**, e é dela que a "
+                f"projeção parte — os instantes abaixo são contados a partir "
+                f"daquele momento, não deste. A fonte segue publicando a "
+                f"leitura pontual, mas parou de publicar a série; é limitação "
+                f"do SACE, não do cálculo.",
+                icon="🕐",
+            )
 
         k1, k2, k3, k4 = st.columns(4)
 

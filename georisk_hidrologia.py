@@ -112,6 +112,11 @@ JANELA_PULSO_HORAS = 3
 # Abaixo disto a correlação chuva-local x nível não sustenta projeção.
 CORRELACAO_MINIMA = 0.30
 
+# A partir de quantas horas sem dado novo a série deixa de sustentar projeção.
+# O SACE publica de 15 em 15 min e o coletor roda de 3 em 3 h; seis horas é o
+# dobro da cadência de coleta — atraso maior é a fonte parada, não jitter.
+IDADE_MAXIMA_ANCORA_HORAS = 6.0
+
 # Meia-vida do índice de encharcamento: em quantos dias a chuva de hoje perde
 # metade do peso sobre a umidade do solo. 3 dias é o valor usual em bacias
 # subtropicais úmidas; solo arenoso drena mais rápido (1-2 d), argiloso mais
@@ -1665,6 +1670,27 @@ def estimar_tempo_e_impacto_inundacao(
     resposta["cota_atual_cm"] = (
         None if pd.isna(df["cota_cm"].iloc[-1]) else round(float(df["cota_cm"].iloc[-1]), 1)
     )
+
+    # --- IDADE DA ÂNCORA
+    #
+    # Toda a projeção parte do fim da série, não da leitura pontual do cadastro.
+    # Quando a fonte para de publicar a série mas segue publicando a leitura, as
+    # duas divergem e o painel mostrava projeção de dias atrás como se fosse de
+    # agora — em agosto de 2026 o CSV de 15 min do SACE parou por quatro dias
+    # enquanto a página do relatório continuava atualizando.
+    #
+    # Falha silenciosa é a pior espécie num sistema de decisão, então a idade da
+    # âncora entra na resposta e derruba a confiabilidade quando passa do limite.
+    resposta["ancora_em"] = str(instante_atual)
+    idade_h = (pd.Timestamp.now() - instante_atual).total_seconds() / 3600.0
+    resposta["idade_ancora_horas"] = round(idade_h, 1)
+    resposta["ancora_defasada"] = bool(idade_h > IDADE_MAXIMA_ANCORA_HORAS)
+    if resposta["ancora_defasada"]:
+        resposta["avisos"].append(
+            f"A série desta estação não é atualizada há {idade_h:.0f} h "
+            f"(última em {instante_atual}). A projeção parte daí, não de agora — "
+            f"é limitação da fonte, que parou de publicar a série de 15 min."
+        )
     resposta["precipitacao_acumulada_mm"] = {
         f"{h}h": round(float(acumulados[f"p{h}h"].iloc[-1]), 2) for h in JANELAS_HORAS
     }
@@ -2095,6 +2121,13 @@ def estimar_tempo_e_impacto_inundacao(
                 f"{ganho_agrupado:+.2f} sobre a persistência prevendo estação "
                 f"que nunca viu."
             )
+
+    # Âncora velha derruba a confiabilidade, venha a projeção de onde vier.
+    # Fica por último de propósito: o modelo agrupado marca `confiavel = True`
+    # quando assume, e sem esta linha uma série parada há dias voltaria a ser
+    # apresentada como projeção boa.
+    if resposta.get("ancora_defasada"):
+        resposta["confiavel"] = False
 
     resposta["grafico_hietograma_hidrograma"] = grafico_hietograma_hidrograma(
         df, cadastro, projecao, tempo.tc_horas
