@@ -1840,6 +1840,9 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
     ap.add_argument("--anos", type=int, default=15, help="quantos anos de historico")
     ap.add_argument("--importar-arquivo", action="store_true",
                     help="recarregar dados/serie/*.csv.gz para o banco (maquina nova)")
+    ap.add_argument("--minimo", type=int, default=100,
+                    help="minimo de estacoes para a rodada valer (abaixo disso, "
+                         "falha e nao exporta)")
     args = ap.parse_args()
 
     if args.historico:
@@ -1859,18 +1862,50 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
         print(f"{n:,} registros históricos recarregados de dados/serie/")
         raise SystemExit(0)
 
-    resumo = sincronizar(
-        incluir_ana=not args.sem_ana,
-        progresso=lambda f, m: print(f"[{f:5.0%}] {m}"),
-    )
+    # --- COLHEITA, COM A DISTINÇÃO QUE IMPORTA
+    #
+    # Falha de rede pontual não é a fonte quebrada. A rodada das 23h21 de
+    # 12/08/2026 morreu inteira por uma exceção que escapou, enquanto as
+    # rodadas antes e depois passaram com o mesmo código — e o alarme que
+    # chegou ao usuário foi idêntico ao de um problema real.
+    #
+    # Mas silenciar tudo seria repetir o erro do `circleMarker`, quando o
+    # coletor devolveu zero estação relatando "0 erros" por três dias. O
+    # critério, então, não é a exceção: é a COLHEITA. Voltou dado plausível,
+    # a rodada vale mesmo com erros; voltou pouco ou nada, falha alto.
+    try:
+        resumo = sincronizar(
+            incluir_ana=not args.sem_ana,
+            progresso=lambda f, m: print(f"[{f:5.0%}] {m}"),
+        )
+    except Exception as erro:
+        print(f"\nFALHA NA COLETA: {type(erro).__name__}: {erro}")
+        raise SystemExit(1) from erro
+
     print(json.dumps({k: v for k, v in resumo.items() if k != "erros"}, indent=2, default=str))
     if resumo["erros"]:
         print(f"\n{len(resumo['erros'])} avisos (primeiros 10):")
         for e in resumo["erros"][:10]:
             print("  -", e)
 
+    colhidas = int(resumo.get("estacoes") or 0)
+    if colhidas < args.minimo:
+        print(
+            f"\nFALHA: {colhidas} estações colhidas, abaixo do mínimo de "
+            f"{args.minimo}. O banco NÃO foi exportado — publicar um snapshot "
+            f"quase vazio apagaria o bom que já está versionado."
+        )
+        raise SystemExit(1)
+
     if args.exportar:
         for caminho in exportar_snapshot():
             print("exportado:", caminho)
         for caminho in exportar_series_mensais():
             print("arquivado:", caminho)
+
+    if resumo["erros"]:
+        print(
+            f"\nRodada válida com {colhidas} estações e "
+            f"{len(resumo['erros'])} avisos — erros pontuais de fonte não "
+            f"invalidam a colheita."
+        )
