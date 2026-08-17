@@ -852,6 +852,65 @@ medido, contra referência independente sempre que houve uma.
 | Seleção de preditores | travada em 3 instantes do evento com `ate_instante` | mudou sozinha em **4 de 4 estações** ao saturar |
 | Cobertura de projeção | 25 estações com série de cota | **22 confiáveis (88 %)** |
 
+### Validação operacional — contra a rede e contra o rio
+
+Tudo acima é validação de método. Esta seção é diferente: confronta o sistema
+**em operação** com a realidade, sem nada preparado para o teste.
+
+**1. O dado bate com a fonte.** Dez estações fluviométricas do SACE, comparadas
+ao vivo contra a página do órgão. Cinco idênticas no instante; as outras cinco
+divergiam de +2 a +32 cm. Confrontando cada uma contra a série da fonte **no
+mesmo carimbo de tempo**, as cinco batem **exatamente** — a diferença era tempo
+decorrido entre a coleta e a conferência, com os rios em recessão (Bom Retiro do
+Sul caiu 34 cm em 2 h). **10 de 10 corretas.**
+
+**2. A projeção contra o que o rio fez.** O `dados/projecao.csv` é versionado a
+cada rodada do coletor, gravado sem saber do futuro. Reabrindo **45 snapshots**
+do histórico do Git e cruzando cada pico projetado com o nível observado no
+instante previsto:
+
+| | n | MAE | Persistência | Skill |
+|---|---|---|---|---|
+| **Todas** | 371 | **63,7 cm** | 81,6 cm | **+0,357** |
+| 0–3 h | 77 | 13,2 cm | 18,0 cm | +0,523 |
+| 3–6 h | 35 | 54,3 cm | 59,6 cm | **−0,027** |
+| 6–12 h | 79 | 50,0 cm | 66,0 cm | +0,557 |
+| 12–24 h | 125 | 111,0 cm | 136,6 cm | +0,312 |
+| 24 h+ | 55 | 52,4 cm | 82,4 cm | +0,509 |
+
+São 371 previsões genuínas sobre 43 estações, horizonte de 0 a 77 h (mediana
+11,3 h). O sistema **bate a persistência** no conjunto, e o erro de 13 cm nas
+primeiras 3 horas é utilizável. Na faixa de 12 a 24 h o viés é **−44 cm**: o
+modelo subestima o pico, que é o lado errado para errar.
+
+#### O selo de confiabilidade está invertido
+
+O achado mais incômodo, e ele contradiz o que o painel afirma:
+
+| | n | MAE | Persistência | Skill |
+|---|---|---|---|---|
+| Marcadas **confiáveis** | 138 | 107,8 cm | 126,6 cm | +0,217 |
+| Marcadas **não confiáveis** | 233 | **37,5 cm** | 55,0 cm | **+0,634** |
+
+As previsões que o sistema apresenta como confiáveis erram **quase três vezes
+mais**, e ganham menos da persistência mesmo depois de normalizar pela
+dificuldade. Parte é seleção — o selo cai sobre rios grandes, de oscilação
+maior — mas para quem lê o painel a mensagem é enganosa. **O selo não está
+selecionando as previsões boas.**
+
+Por estação, a dispersão é enorme. Ganho sobre a persistência, em cm de MAE:
+
+| Melhores | | Piores | |
+|---|---|---|---|
+| Garruchos | +68,0 | Rosário do Sul | **−57,9** |
+| Porto Mariante | +63,2 | Estrela | −21,7 |
+| Santa Tereza | +58,7 | Passo Carreiro | −12,7 |
+
+Nota metodológica: dos 1.711 pares recuperados do histórico, **1.340 tinham o
+instante do pico no passado** — resquício da âncora defasada, corrigida depois.
+Foram descartados: retrospectiva não é previsão. Os números acima usam só os
+371 genuinamente futuros.
+
 ### Erros silenciosos corrigidos
 
 Nenhum destes gerava exceção. Todos produziam número errado com aparência de
