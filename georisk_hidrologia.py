@@ -1306,13 +1306,29 @@ _cache_agrupado: dict[float, "ModeloAgrupado | None"] = {}
 
 
 def obter_modelo_agrupado(
-    horizonte_horas: float = 6.0, db_path: str = CAMINHO_BANCO_PADRAO
+    horizonte_horas: float = 6.0, db_path: str = CAMINHO_BANCO_PADRAO,
+    bacia_oficial: str | None = None,
 ) -> "ModeloAgrupado | None":
-    """Modelo agrupado com cache — treinar varre a série de todas as estações."""
-    chave = round(horizonte_horas, 2)
+    """Modelo agrupado com cache — treinar varre a série de todas as estações.
+
+    Devolve **None quando o modelo não bate a persistência**, e isso é a regra
+    mais importante daqui. Conforme mais estações do SACE ganharam cota oficial,
+    o agrupamento do estado inteiro foi de 23 para 45 estações e o ganho
+    deixa-uma-fora caiu de +0,45 para −1,58: um ajuste linear único não cobre
+    rios de 1.120 e de 215.612 km² ao mesmo tempo. Restringindo ao Taquari-Antas,
+    as mesmas 14 estações dão +0,42.
+
+    Modelo com ganho negativo é pior que não responder, então ele não responde.
+    """
+    chave = (round(horizonte_horas, 2), bacia_oficial)
     if chave not in _cache_agrupado:
         try:
-            _cache_agrupado[chave] = treinar_modelo_agrupado(horizonte_horas, db_path)
+            modelo = treinar_modelo_agrupado(
+                horizonte_horas, db_path, bacia_oficial=bacia_oficial
+            )
+            if modelo is not None and modelo.ganho_estacao_nova <= 0:
+                modelo = None
+            _cache_agrupado[chave] = modelo
         except Exception:
             _cache_agrupado[chave] = None
     return _cache_agrupado[chave]
@@ -1323,23 +1339,38 @@ def treinar_modelo_agrupado(
     db_path: str = CAMINHO_BANCO_PADRAO,
     dias: int = 30,
     progresso=None,
+    bacia_oficial: str | None = None,
 ) -> ModeloAgrupado | None:
     """Treina um ajuste único sobre todas as estações com cota oficial.
 
     A validação é DEIXA-UMA-ESTAÇÃO-DE-FORA: treina em N-1 e mede na que ficou
     fora. É a pergunta certa — "este modelo serve para uma estação que ele nunca
     viu?" — e é bem mais dura que validar no tempo da mesma estação.
+
+    `bacia_oficial` restringe o treino a uma bacia do shapefile do RS. Existe
+    porque agrupar o estado inteiro piorou conforme mais estações ganharam cota:
+    de 23 para 45 estações, o ganho caiu de +0,45 para −1,58. Um ajuste linear
+    único não cobre rios de 1.120 e de 215.612 km² ao mesmo tempo.
     """
     passos = max(1, int(round(horizonte_horas * PASSOS_POR_HORA)))
 
     with _conectar(db_path) as con:
         con.row_factory = sqlite3.Row
-        estacoes = [
-            dict(r) for r in con.execute(
-                "SELECT id, nome, bacia, cota_inundacao_cm FROM estacao "
-                "WHERE fonte = 'SACE/SGB' AND cota_inundacao_cm IS NOT NULL"
+        if bacia_oficial:
+            consulta = (
+                "SELECT e.id, e.nome, e.bacia, e.cota_inundacao_cm FROM estacao e "
+                "JOIN bacia_oficial b ON b.id_estacao = e.id "
+                "WHERE e.fonte = 'SACE/SGB' AND e.cota_inundacao_cm IS NOT NULL "
+                "AND b.bacia = ?"
             )
-        ]
+            estacoes = [dict(r) for r in con.execute(consulta, (bacia_oficial,))]
+        else:
+            estacoes = [
+                dict(r) for r in con.execute(
+                    "SELECT id, nome, bacia, cota_inundacao_cm FROM estacao "
+                    "WHERE fonte = 'SACE/SGB' AND cota_inundacao_cm IS NOT NULL"
+                )
+            ]
 
     blocos = []
     for i, est in enumerate(estacoes):
@@ -2040,8 +2071,24 @@ def estimar_tempo_e_impacto_inundacao(
         pontos_agrupado = []
         ganho_agrupado = None
 
+        # A bacia oficial da estação passa a delimitar o agrupamento. Só cai no
+        # modelo do estado inteiro se a bacia não tiver estações bastante — e
+        # mesmo aí `obter_modelo_agrupado` devolve None se o ganho for negativo.
+        try:
+            import georisk_geo as _gg
+            bacia_do_modelo = _gg.bacia_oficial_da_estacao(estacao_id, db_path)
+        except Exception:
+            bacia_do_modelo = None
+
         for horas in horizontes:
-            modelo_ag = obter_modelo_agrupado(horizonte_horas=horas, db_path=db_path)
+            modelo_ag = obter_modelo_agrupado(
+                horizonte_horas=horas, db_path=db_path,
+                bacia_oficial=bacia_do_modelo,
+            )
+            if modelo_ag is None:
+                modelo_ag = obter_modelo_agrupado(
+                    horizonte_horas=horas, db_path=db_path
+                )
             if modelo_ag is None or modelo_ag.ganho_estacao_nova <= 0:
                 continue
             previsto = projetar_com_agrupado(estacao_id, modelo_ag, db_path)

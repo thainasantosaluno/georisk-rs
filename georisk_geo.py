@@ -546,7 +546,17 @@ def mancha_de_evento(
 # 4. POLÍGONO DA BACIA
 # -----------------------------------------------------------------------------
 def baixar_bacia(bacia: str, db_path: str = CAMINHO_BANCO_PADRAO) -> dict | None:
-    """Polígono da bacia, direto do SACE — evita delinear bacia a partir de MDE."""
+    """Polígono da bacia. Três origens, nesta ordem.
+
+    1. Cache local em `bacia_geom`.
+    2. Shape publicado pelo SACE — existe só para as quatro bacias que ele
+       monitora, e é a origem histórica desta função.
+    3. **Shapefile oficial das 26 bacias do RS**, em `bacia_poligono`.
+
+    A terceira origem é o que permite calcular Curve Number fora das quatro do
+    SACE. Sem ela, 485 das 552 estações herdavam o CN genérico de 75 por não
+    pertencerem a nenhuma bacia com contorno conhecido.
+    """
     criar_schema_geo(db_path)
     with _conectar(db_path) as con:
         linha = con.execute(
@@ -558,8 +568,23 @@ def baixar_bacia(bacia: str, db_path: str = CAMINHO_BANCO_PADRAO) -> dict | None
     try:
         r = _sessao().get(f"{SACE_SHAPES}bacia_{bacia}_shape.json", timeout=TEMPO_LIMITE)
         geo = r.json()
+        if not geo.get("features"):
+            raise ValueError("sem feições")
     except Exception:
-        return None
+        with _conectar(db_path) as con:
+            oficial = con.execute(
+                "SELECT geojson FROM bacia_poligono WHERE nome=?", (bacia,)
+            ).fetchone()
+        if not oficial:
+            return None
+        geo = {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "properties": {"nome": bacia, "origem": "shapefile oficial do RS"},
+                "geometry": json.loads(oficial[0]),
+            }],
+        }
 
     with _conectar(db_path) as con:
         con.execute(
