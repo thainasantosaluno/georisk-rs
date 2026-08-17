@@ -81,6 +81,7 @@ import math
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+import io
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -2129,6 +2130,43 @@ def estimar_tempo_e_impacto_inundacao(
     if resposta.get("ancora_defasada"):
         resposta["confiavel"] = False
 
+    # --- O SELO PASSA A SER MEDIDO, NÃO DERIVADO
+    #
+    # O `confiavel` antigo vinha do ganho sobre a persistência dentro da janela
+    # de treino. Confrontado com 371 previsões reais, saiu invertido: as
+    # marcadas confiáveis erraram 107,8 cm contra 37,5 cm das não marcadas.
+    #
+    # Agora a palavra vale o que o histórico mostra. `erro_esperado_cm` é o erro
+    # que ESTA estação cometeu NESTE horizonte em previsões passadas, e o selo
+    # só fica de pé se lá atrás ela de fato bateu a persistência. Sem medição
+    # suficiente, o selo cai — silêncio é melhor que carimbo sem lastro.
+    horizonte_selo = resposta.get("horizonte_util_horas") or tempo.tc_horas or 6.0
+    medido = erro_medido(estacao_id, float(horizonte_selo), db_path)
+    resposta["desempenho_medido"] = medido
+    if medido:
+        resposta["erro_esperado_cm"] = medido["mae_cm"]
+        # A medição DECIDE, não apenas veta. Manter o critério antigo como
+        # pré-requisito preservaria o sinal invertido que ele produzia: Muçum
+        # tem skill medido de +0,58 e o ajuste interno o reprovava.
+        resposta["confiavel"] = bool(
+            medido["supera_persistencia"] and not resposta.get("ancora_defasada")
+        )
+        if not medido["supera_persistencia"]:
+            resposta["avisos"].append(
+                f"Nas previsões passadas desta {medido['origem']} no horizonte "
+                f"de {medido['faixa']}, o erro medido foi de {medido['mae_cm']:.0f} cm "
+                f"contra {medido['mae_persistencia_cm']:.0f} cm de simplesmente "
+                f"supor o nível parado ({medido['n']} casos). Não houve ganho — "
+                f"a projeção não sustenta decisão neste horizonte."
+            )
+    else:
+        resposta["erro_esperado_cm"] = None
+        resposta["confiavel"] = False
+        resposta["avisos"].append(
+            "Sem histórico medido de acerto para esta estação e horizonte. "
+            "A projeção é exibida como diagnóstico, não como base de decisão."
+        )
+
     resposta["grafico_hietograma_hidrograma"] = grafico_hietograma_hidrograma(
         df, cadastro, projecao, tempo.tc_horas
     )
@@ -2347,6 +2385,204 @@ def carregar_projecoes(db_path: str = CAMINHO_BANCO_PADRAO) -> pd.DataFrame:
 
 
 # -----------------------------------------------------------------------------
+# CALIBRAÇÃO CONTRA O DESEMPENHO REAL
+# -----------------------------------------------------------------------------
+# O selo `confiavel` era derivado do próprio ajuste — ganho sobre a persistência
+# medido na janela de treino. Confrontado com 371 previsões reais, ele saiu
+# INVERTIDO: as marcadas confiáveis erraram 107,8 cm contra 37,5 cm das
+# marcadas não confiáveis.
+#
+# Num sistema de decisão isso é pior que não ter selo. A correção não é afinar a
+# fórmula: é parar de derivar a confiança do ajuste e passar a MEDI-LA contra o
+# que o rio fez. O `dados/projecao.csv` versionado a cada rodada é o registro
+# necessário — foi gravado sem saber do futuro, e o futuro já aconteceu.
+#
+# O selo passa a significar uma frase verificável: "nesta estação, neste
+# horizonte, o erro medido foi de X cm em N previsões passadas". Onde não há
+# medição suficiente, não há selo — silêncio é mais honesto que um carimbo.
+
+# Faixas de horizonte da calibração, em horas.
+FAIXAS_HORIZONTE_CALIBRACAO = ((0, 3), (3, 6), (6, 12), (12, 24), (24, 96))
+
+# Abaixo disto a média não significa nada e a estação fica sem selo.
+MINIMO_PARES_CALIBRACAO = 8
+
+
+def criar_schema_calibracao(db_path: str = CAMINHO_BANCO_PADRAO) -> None:
+    with _conectar(db_path) as con:
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS calibracao_erro (
+                id_estacao    TEXT,
+                faixa         TEXT,
+                n             INTEGER,
+                mae_cm        REAL,
+                mae_persist_cm REAL,
+                skill         REAL,
+                vies_cm       REAL,
+                atualizado_em TEXT,
+                PRIMARY KEY (id_estacao, faixa)
+            )
+            """
+        )
+
+
+def _pares_do_historico(db_path: str = CAMINHO_BANCO_PADRAO) -> pd.DataFrame:
+    """Previsões passadas x nível observado, recuperadas do histórico do Git.
+
+    Só entram pares cujo instante de pico era FUTURO quando a projeção foi
+    gravada. Dos 1.711 pares recuperáveis, 1.340 tinham o pico no passado —
+    resquício da âncora defasada — e retrospectiva não valida previsão.
+    """
+    import subprocess
+
+    log = subprocess.run(
+        ["git", "log", "--format=%H|%ci", "--", "dados/projecao.csv"],
+        capture_output=True, text=True, cwd=str(Path(db_path).parent),
+    ).stdout.strip().splitlines()
+    if not log:
+        return pd.DataFrame()
+
+    with _conectar(db_path) as con:
+        obs = pd.read_sql_query(
+            "SELECT id_estacao, datahora, valor FROM serie WHERE grandeza='cota'",
+            con, parse_dates=["datahora"],
+        )
+    if obs.empty:
+        return pd.DataFrame()
+    obs = obs.sort_values("datahora")
+    por_estacao = {k: v for k, v in obs.groupby("id_estacao")}
+
+    def observado(eid, quando, tolerancia_min=45):
+        s = por_estacao.get(eid)
+        if s is None or s.empty:
+            return None
+        d = (s["datahora"] - quando).abs()
+        i = d.idxmin()
+        return (
+            float(s.loc[i, "valor"])
+            if d.loc[i] <= timedelta(minutes=tolerancia_min) else None
+        )
+
+    linhas = []
+    for entrada in log:
+        sha, quando = entrada.split("|")
+        bruto = subprocess.run(
+            ["git", "show", f"{sha}:dados/projecao.csv"],
+            capture_output=True, text=True, cwd=str(Path(db_path).parent),
+        ).stdout
+        try:
+            df = pd.read_csv(io.StringIO(bruto))
+        except Exception:
+            continue
+        if "instante_pico" not in df.columns:
+            continue
+        t0 = pd.Timestamp(quando[:19])
+        for r in df.itertuples():
+            pico = getattr(r, "pico_projetado_cm", np.nan)
+            inst = getattr(r, "instante_pico", np.nan)
+            if pd.isna(pico) or pd.isna(inst):
+                continue
+            alvo = pd.Timestamp(inst)
+            horas = (alvo - t0).total_seconds() / 3600.0
+            if horas <= 0:
+                continue
+            real = observado(r.id_estacao, alvo)
+            if real is None:
+                continue
+            linhas.append({
+                "id_estacao": r.id_estacao, "horas": horas,
+                "ancora": r.cota_atual_cm, "previsto": float(pico), "real": real,
+            })
+    return pd.DataFrame(linhas)
+
+
+def calibrar_contra_historico(db_path: str = CAMINHO_BANCO_PADRAO) -> pd.DataFrame:
+    """Mede o erro real por estação e faixa de horizonte, e grava."""
+    criar_schema_calibracao(db_path)
+    pares = _pares_do_historico(db_path)
+    if pares.empty:
+        return pd.DataFrame()
+
+    pares["erro"] = pares["previsto"] - pares["real"]
+    pares["persist"] = pares["ancora"] - pares["real"]
+    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    registros = []
+    for (lo, hi) in FAIXAS_HORIZONTE_CALIBRACAO:
+        faixa = f"{lo}-{hi}h"
+        recorte = pares[(pares["horas"] >= lo) & (pares["horas"] < hi)]
+        # Uma linha por estação, e uma linha "GERAL" que serve de reserva para
+        # estação sem medição própria suficiente.
+        for eid, g in list(recorte.groupby("id_estacao")) + [("GERAL", recorte)]:
+            if len(g) < MINIMO_PARES_CALIBRACAO:
+                continue
+            denominador = float((g["persist"] ** 2).mean())
+            registros.append({
+                "id_estacao": eid, "faixa": faixa, "n": int(len(g)),
+                "mae_cm": round(float(g["erro"].abs().mean()), 1),
+                "mae_persist_cm": round(float(g["persist"].abs().mean()), 1),
+                "skill": (
+                    round(1 - float((g["erro"] ** 2).mean()) / denominador, 3)
+                    if denominador > 0 else None
+                ),
+                "vies_cm": round(float(g["erro"].mean()), 1),
+                "atualizado_em": agora,
+            })
+
+    if registros:
+        with _conectar(db_path) as con:
+            con.executemany(
+                "INSERT OR REPLACE INTO calibracao_erro "
+                "(id_estacao,faixa,n,mae_cm,mae_persist_cm,skill,vies_cm,atualizado_em) "
+                "VALUES (:id_estacao,:faixa,:n,:mae_cm,:mae_persist_cm,:skill,"
+                ":vies_cm,:atualizado_em)",
+                registros,
+            )
+    return pd.DataFrame(registros)
+
+
+def erro_medido(
+    estacao_id: str, horas: float, db_path: str = CAMINHO_BANCO_PADRAO
+) -> dict | None:
+    """Desempenho MEDIDO desta estação neste horizonte, ou None se não há.
+
+    Preferência pela medição da própria estação; sem ela, a da rede inteira,
+    marcada como tal. None quando nem uma nem outra existe — e aí o painel não
+    tem o que carimbar.
+    """
+    faixa = next(
+        (f"{lo}-{hi}h" for lo, hi in FAIXAS_HORIZONTE_CALIBRACAO if lo <= horas < hi),
+        None,
+    )
+    if faixa is None:
+        return None
+    try:
+        criar_schema_calibracao(db_path)
+        with _conectar(db_path) as con:
+            for alvo, origem in ((estacao_id, "estação"), ("GERAL", "rede")):
+                linha = con.execute(
+                    "SELECT n, mae_cm, mae_persist_cm, skill, vies_cm "
+                    "FROM calibracao_erro WHERE id_estacao=? AND faixa=?",
+                    (alvo, faixa),
+                ).fetchone()
+                if linha:
+                    return {
+                        "faixa": faixa, "origem": origem, "n": linha[0],
+                        "mae_cm": linha[1], "mae_persistencia_cm": linha[2],
+                        "skill": linha[3], "vies_cm": linha[4],
+                        # A frase que o selo passa a significar: só é decisão
+                        # se bateu a persistência de fato, no passado, aqui.
+                        "supera_persistencia": bool(
+                            linha[3] is not None and linha[3] > 0
+                        ),
+                    }
+    except Exception:
+        return None
+    return None
+
+
+# -----------------------------------------------------------------------------
 # EXECUÇÃO DIRETA — diagnóstico rápido
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -2358,11 +2594,31 @@ if __name__ == "__main__":
     ap.add_argument("--listar", action="store_true", help="listar estações analisáveis")
     ap.add_argument("--projetar", action="store_true",
                     help="projetar todas as estações e gravar o cache do mapa")
+    ap.add_argument("--calibrar", action="store_true",
+                    help="medir o erro real contra o historico versionado de projecoes")
     ap.add_argument("--exportar", metavar="CSV",
                     help="com --projetar, grava também o resultado neste CSV")
     ap.add_argument("--banco", default=CAMINHO_BANCO_PADRAO)
     ap.add_argument("--cn", type=float, default=CN_PADRAO)
     args = ap.parse_args()
+
+    if args.calibrar:
+        print("Medindo o erro real contra o histórico versionado de projeções…")
+        tabela = calibrar_contra_historico(args.banco)
+        if tabela.empty:
+            print("Sem pares suficientes. É preciso histórico de dados/projecao.csv "
+                  "no Git e série de cota no banco.")
+            raise SystemExit(0)
+        geral = tabela[tabela.id_estacao == "GERAL"]
+        print("\nDESEMPENHO DA REDE, por faixa de horizonte:")
+        print(f"  {'faixa':10s} {'n':>5s} {'MAE':>8s} {'persist':>9s} {'skill':>7s} {'viés':>8s}")
+        for r in geral.itertuples():
+            print(f"  {r.faixa:10s} {r.n:5d} {r.mae_cm:7.1f}cm {r.mae_persist_cm:8.1f}cm "
+                  f"{r.skill:+7.3f} {r.vies_cm:+7.1f}cm")
+        porest = tabela[tabela.id_estacao != "GERAL"]
+        print(f"\n{len(porest)} calibrações por estação, "
+              f"{porest.id_estacao.nunique()} estações distintas.")
+        raise SystemExit(0)
 
     if args.projetar:
         print("Projetando todas as estações analisáveis (~1,2 s cada)…")

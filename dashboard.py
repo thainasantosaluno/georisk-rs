@@ -1049,7 +1049,26 @@ with tab_hidro:
         )
 
         # --- Confiabilidade em destaque: é o que decide se dá para usar
-        if resultado["confiavel"]:
+        # O selo agora carrega o número medido. "Confiável" sozinho é opinião;
+        # "errou 52 cm em 55 previsões passadas" é verificável — e é o que
+        # permite decidir se a margem cabe na decisão que se vai tomar.
+        medido = resultado.get("desempenho_medido")
+        if resultado["confiavel"] and medido:
+            st.success(
+                f"**Erro medido de {medido['mae_cm']:.0f} cm** neste horizonte "
+                f"({medido['faixa']}), em {medido['n']} previsões passadas desta "
+                f"{medido['origem']} — contra "
+                f"{medido['mae_persistencia_cm']:.0f} cm de supor o nível parado. "
+                f"Tendência: {resultado['tendencia']}.",
+                icon="✅",
+            )
+            if abs(medido.get("vies_cm") or 0) > 20:
+                lado = "SUBESTIMA" if medido["vies_cm"] < 0 else "superestima"
+                st.caption(
+                    f"Viés de {medido['vies_cm']:+.0f} cm: historicamente esta "
+                    f"faixa **{lado}** o pico. Considere na margem."
+                )
+        elif resultado["confiavel"]:
             st.success(
                 f"Projeção com ganho real sobre a persistência até "
                 f"**{resultado['horizonte_util_horas']:.1f} h** à frente "
