@@ -1472,7 +1472,7 @@ def grafico_hietograma_hidrograma(
     tc_horas: float | None,
     dias_exibidos: int = 12,
 ) -> go.Figure:
-    """Hietograma (barras, eixo invertido no topo) + hidrograma medido (linha)
+    """Hietograma (barras, crescendo de baixo) + hidrograma medido (linha)
     + hidrograma projetado (tracejado), deslocado no tempo pelo Tc.
     """
     # Fatiamento por índice em vez de DataFrame.last(), que saiu no pandas 3.0.
@@ -1556,12 +1556,21 @@ def grafico_hietograma_hidrograma(
         title_text="<b>Nível (cm)</b>", secondary_y=False,
         showgrid=True, gridcolor="#eaeaea",
     )
-    # Chuva invertida e ocupando a metade de cima: convenção de hietograma.
+    # Chuva crescendo DE BAIXO, ocupando o quarto inferior.
+    #
+    # A convenção clássica de hietograma pendura as barras do topo, com o eixo
+    # invertido — era o que estava aqui (`range=[pico*4, 0]`). Funciona para
+    # quem já leu centenas deles e confunde todo o resto, e o painel vai a
+    # consulta pública. Chuva sobe, nível sobe, e as duas se leem no mesmo
+    # sentido: mais alto é mais.
+    #
+    # O fator 4 mantém a chuva no quarto de baixo, para ela não competir com a
+    # linha do nível, que é a informação principal.
     if not recorte.empty and recorte["chuva_mm"].sum() > 0:
         pico = float(recorte["chuva_mm"].resample("h").sum().max())
         fig.update_yaxes(
             title_text="<b>Chuva (mm/h)</b>", secondary_y=True,
-            range=[max(pico * 4, 1), 0], showgrid=False,
+            range=[0, max(pico * 4, 1)], showgrid=False,
         )
     return fig
 
