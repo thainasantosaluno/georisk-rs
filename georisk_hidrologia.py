@@ -2456,19 +2456,32 @@ MINIMO_PARES_CALIBRACAO = 8
 
 
 def criar_schema_calibracao(db_path: str = CAMINHO_BANCO_PADRAO) -> None:
+    """Tabela do desempenho medido.
+
+    A chave inclui `origem` porque há duas medições independentes e ambas
+    valem: a OPERACIONAL, das projeções versionadas a cada rodada — poucos
+    pares, mas do sistema exatamente como roda —; e a HISTÓRICA, de 15 anos de
+    série diária, com dezenas de cheias em vez de uma.
+    """
     with _conectar(db_path) as con:
+        colunas = [
+            c[1] for c in con.execute("PRAGMA table_info(calibracao_erro)").fetchall()
+        ]
+        if colunas and "origem" not in colunas:
+            con.execute("DROP TABLE calibracao_erro")
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS calibracao_erro (
                 id_estacao    TEXT,
                 faixa         TEXT,
+                origem        TEXT,
                 n             INTEGER,
                 mae_cm        REAL,
                 mae_persist_cm REAL,
                 skill         REAL,
                 vies_cm       REAL,
                 atualizado_em TEXT,
-                PRIMARY KEY (id_estacao, faixa)
+                PRIMARY KEY (id_estacao, faixa, origem)
             )
             """
         )
@@ -2566,7 +2579,8 @@ def calibrar_contra_historico(db_path: str = CAMINHO_BANCO_PADRAO) -> pd.DataFra
                 continue
             denominador = float((g["persist"] ** 2).mean())
             registros.append({
-                "id_estacao": eid, "faixa": faixa, "n": int(len(g)),
+                "id_estacao": eid, "faixa": faixa, "origem": "operacional",
+                "n": int(len(g)),
                 "mae_cm": round(float(g["erro"].abs().mean()), 1),
                 "mae_persist_cm": round(float(g["persist"].abs().mean()), 1),
                 "skill": (
@@ -2581,9 +2595,146 @@ def calibrar_contra_historico(db_path: str = CAMINHO_BANCO_PADRAO) -> pd.DataFra
         with _conectar(db_path) as con:
             con.executemany(
                 "INSERT OR REPLACE INTO calibracao_erro "
-                "(id_estacao,faixa,n,mae_cm,mae_persist_cm,skill,vies_cm,atualizado_em) "
-                "VALUES (:id_estacao,:faixa,:n,:mae_cm,:mae_persist_cm,:skill,"
-                ":vies_cm,:atualizado_em)",
+                "(id_estacao,faixa,origem,n,mae_cm,mae_persist_cm,skill,vies_cm,"
+                "atualizado_em) VALUES (:id_estacao,:faixa,:origem,:n,:mae_cm,"
+                ":mae_persist_cm,:skill,:vies_cm,:atualizado_em)",
+                registros,
+            )
+    return pd.DataFrame(registros)
+
+
+def _casar_codigo_historico(codigo, mapa: dict[str, str]) -> str | None:
+    """Casa o código do histórico com o id do cadastro.
+
+    Mesmo zero final que atrapalhava a área de drenagem: Santa Tereza é
+    `8647260` num lado e `86472600` no outro. Sem tolerar, 7 das 34 séries
+    históricas casavam; com, sobem para 25.
+    """
+    k = str(codigo).strip().lstrip("0")
+    if not k:
+        return None
+    for candidato in (k, k + "0", k[:-1] if k.endswith("0") else None):
+        if candidato and candidato in mapa:
+            return mapa[candidato]
+    return None
+
+
+def calibrar_com_serie_historica(
+    db_path: str = CAMINHO_BANCO_PADRAO, dias_adiante: tuple[int, ...] = (1, 2, 3)
+) -> pd.DataFrame:
+    """Mede o acerto sobre 15 anos de série diária, com dezenas de cheias.
+
+    POR QUE ESTA MEDIÇÃO EXISTE AO LADO DA OPERACIONAL
+    A calibração operacional é do sistema exatamente como roda, mas se apoia
+    em poucos dias de projeções versionadas e essencialmente um evento. O
+    histórico traz 2011–2026 e dezenas de cheias — muito mais poder para os
+    horizontes longos, que são justamente onde a amostra operacional é fina.
+
+    O QUE ELA VALIDA, E O QUE NÃO
+    A série histórica é DIÁRIA. Ela não resolve o tempo de resposta, que vai de
+    1 a 17 h, então não valida o regime sub-diário. Valida o regime de 24 h para
+    cima, onde a resposta da bacia já aconteceu e o que resta é a propagação —
+    e é lá que a amostra operacional tinha só 55 pares.
+
+    A validação é walk-forward com janela expansiva: para prever o dia t só usa
+    o que existia até t−1. Nunca vê o futuro.
+    """
+    criar_schema_calibracao(db_path)
+
+    with _conectar(db_path) as con:
+        cadastro = pd.read_sql_query(
+            "SELECT id, codigo FROM estacao WHERE codigo IS NOT NULL", con
+        )
+        historico = pd.read_sql_query(
+            "SELECT codigo_estacao, datahora, valor FROM serie_historica "
+            "WHERE grandeza='cota' ORDER BY datahora",
+            con, parse_dates=["datahora"],
+        )
+    if historico.empty:
+        return pd.DataFrame()
+
+    mapa: dict[str, str] = {}
+    for r in cadastro.itertuples():
+        chave = str(r.codigo).strip().lstrip("0")
+        if chave:
+            mapa.setdefault(chave, r.id)
+
+    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    registros, acumulado = [], []
+
+    for codigo, bloco in historico.groupby("codigo_estacao"):
+        estacao_id = _casar_codigo_historico(codigo, mapa)
+        if estacao_id is None or len(bloco) < 400:
+            continue
+        s = bloco.set_index("datahora")["valor"].resample("1D").mean().interpolate(limit=3)
+        s = s.dropna()
+        if len(s) < 400:
+            continue
+
+        for passos in dias_adiante:
+            nivel = s.to_numpy(dtype=float)
+            subida = np.diff(nivel, prepend=nivel[0])
+            alvo = np.roll(nivel, -passos) - nivel        # prevê ΔH, como em operação
+            # A coluna de uns entra aqui: `_minimos_quadrados_regularizados`
+            # espera o intercepto já na matriz (ele zera a penalidade da coluna 0).
+            X = np.column_stack([np.ones(len(nivel)), nivel, subida])
+            valido = np.arange(len(nivel)) < len(nivel) - passos
+
+            X, y = X[valido], alvo[valido]
+            if len(y) < 300:
+                continue
+
+            # Walk-forward: metade inicial treina, e cada previsão adiante usa
+            # só o que veio antes dela.
+            corte = len(y) // 2
+            erros, persistencias = [], []
+            for i in range(corte, len(y)):
+                beta = _minimos_quadrados_regularizados(X[:i], y[:i])
+                previsto = float(X[i] @ beta)
+                erros.append(previsto - y[i])
+                persistencias.append(-y[i])   # persistência: ΔH previsto = 0
+            if len(erros) < 100:
+                continue
+
+            erros = np.asarray(erros)
+            persistencias = np.asarray(persistencias)
+            denominador = float((persistencias ** 2).mean())
+            registros.append({
+                "id_estacao": estacao_id, "faixa": f"{passos * 24}h",
+                "origem": "historico", "n": int(len(erros)),
+                "mae_cm": round(float(np.abs(erros).mean()), 1),
+                "mae_persist_cm": round(float(np.abs(persistencias).mean()), 1),
+                "skill": (round(1 - float((erros ** 2).mean()) / denominador, 3)
+                          if denominador > 0 else None),
+                "vies_cm": round(float(erros.mean()), 1),
+                "atualizado_em": agora,
+            })
+            acumulado.append((passos, erros, persistencias))
+
+    # Linha GERAL por faixa, que serve de reserva para estação sem histórico.
+    for passos in dias_adiante:
+        e = [x for p, x, _ in acumulado if p == passos]
+        pr = [x for p, _, x in acumulado if p == passos]
+        if not e:
+            continue
+        e = np.concatenate(e)
+        pr = np.concatenate(pr)
+        den = float((pr ** 2).mean())
+        registros.append({
+            "id_estacao": "GERAL", "faixa": f"{passos * 24}h", "origem": "historico",
+            "n": int(len(e)), "mae_cm": round(float(np.abs(e).mean()), 1),
+            "mae_persist_cm": round(float(np.abs(pr).mean()), 1),
+            "skill": round(1 - float((e ** 2).mean()) / den, 3) if den > 0 else None,
+            "vies_cm": round(float(e.mean()), 1), "atualizado_em": agora,
+        })
+
+    if registros:
+        with _conectar(db_path) as con:
+            con.executemany(
+                "INSERT OR REPLACE INTO calibracao_erro "
+                "(id_estacao,faixa,origem,n,mae_cm,mae_persist_cm,skill,vies_cm,"
+                "atualizado_em) VALUES (:id_estacao,:faixa,:origem,:n,:mae_cm,"
+                ":mae_persist_cm,:skill,:vies_cm,:atualizado_em)",
                 registros,
             )
     return pd.DataFrame(registros)
@@ -2604,18 +2755,35 @@ def erro_medido(
     )
     if faixa is None:
         return None
+    # Faixa equivalente na grade do histórico, que é diária.
+    faixa_hist = next(
+        (f"{d * 24}h" for d in (1, 2, 3) if abs(horas - d * 24) <= 12), None
+    )
+
+    # ORDEM DE PREFERÊNCIA. Quem já tem medição operacional própria mantém essa
+    # relação; quem não tem desce a escada até achar lastro. Operacional vem
+    # primeiro por ser o sistema exatamente como roda; o histórico entra como
+    # reserva, com muito mais eventos porém em resolução diária.
+    tentativas = [
+        (estacao_id, "operacional", faixa, "estação"),
+        ("GERAL", "operacional", faixa, "rede"),
+        (estacao_id, "historico", faixa_hist, "estação, 15 anos"),
+        ("GERAL", "historico", faixa_hist, "rede, 15 anos"),
+    ]
     try:
         criar_schema_calibracao(db_path)
         with _conectar(db_path) as con:
-            for alvo, origem in ((estacao_id, "estação"), ("GERAL", "rede")):
+            for alvo, origem, chave_faixa, rotulo in tentativas:
+                if chave_faixa is None:
+                    continue
                 linha = con.execute(
                     "SELECT n, mae_cm, mae_persist_cm, skill, vies_cm "
-                    "FROM calibracao_erro WHERE id_estacao=? AND faixa=?",
-                    (alvo, faixa),
+                    "FROM calibracao_erro WHERE id_estacao=? AND faixa=? AND origem=?",
+                    (alvo, chave_faixa, origem),
                 ).fetchone()
                 if linha:
                     return {
-                        "faixa": faixa, "origem": origem, "n": linha[0],
+                        "faixa": chave_faixa, "origem": rotulo, "n": linha[0],
                         "mae_cm": linha[1], "mae_persistencia_cm": linha[2],
                         "skill": linha[3], "vies_cm": linha[4],
                         # A frase que o selo passa a significar: só é decisão
@@ -2665,6 +2833,19 @@ if __name__ == "__main__":
         porest = tabela[tabela.id_estacao != "GERAL"]
         print(f"\n{len(porest)} calibrações por estação, "
               f"{porest.id_estacao.nunique()} estações distintas.")
+
+        print("\nMedindo também contra 15 anos de série diária…")
+        hist = calibrar_com_serie_historica(args.banco)
+        if hist.empty:
+            print("  sem série histórica suficiente.")
+        else:
+            g = hist[hist.id_estacao == "GERAL"]
+            print(f"  {'faixa':8s} {'n':>7s} {'MAE':>9s} {'persist':>10s} {'skill':>8s}")
+            for r in g.itertuples():
+                print(f"  {r.faixa:8s} {r.n:7d} {r.mae_cm:8.1f}cm {r.mae_persist_cm:9.1f}cm "
+                      f"{r.skill:+8.3f}")
+            pe = hist[hist.id_estacao != "GERAL"]
+            print(f"  {pe.id_estacao.nunique()} estações com histórico calibrado.")
         raise SystemExit(0)
 
     if args.projetar:
