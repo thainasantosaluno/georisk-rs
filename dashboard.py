@@ -297,10 +297,31 @@ def exibir_boletim_modal(row: pd.Series) -> None:
     chuva_txt, nota_chuva = gm.texto_com_idade(
         row.get("chuva_24h"), row["id"], "chuva", " mm", 1)
 
+    # A vazão medida só existe onde a ANA publica: zero das 59 estações do
+    # SACE têm o campo. Onde falta, a curva-chave da PRÓPRIA estação — ajustada
+    # sobre milhares de pares medidos de cota x vazão — preenche, e o rótulo
+    # diz que é estimativa, com o erro típico junto.
+    vazao_medida = row.get("vazao_m3s")
+    estimada = None
+    if (vazao_medida is None or pd.isna(vazao_medida)) and row.get("codigo"):
+        try:
+            estimada = gd.vazao_estimada(row["codigo"], row.get("nivel_cm"))
+        except Exception:
+            estimada = None
+
     k1, k2, k3 = st.columns(3)
     k1.metric("Nível", nivel_txt, help=nota_nivel)
     k2.metric("Chuva 24h", chuva_txt, help=nota_chuva)
-    k3.metric("Vazão", texto(row.get("vazao_m3s"), " m³/s", 1))
+    if estimada:
+        k3.metric(
+            "Vazão estimada", f"{estimada['vazao_m3s']:,.0f} m³/s".replace(",", "."),
+            help=f"Não medida aqui. Estimada pela curva-chave da própria estação "
+                 f"(r²={estimada['r2']}), com erro típico de "
+                 f"{estimada['erro_tipico_pct']:.0f} %.",
+        )
+        k3.caption(f"estimada · ±{estimada['erro_tipico_pct']:.0f} %")
+    else:
+        k3.metric("Vazão", texto(vazao_medida, " m³/s", 1))
 
     nota = nota_nivel or nota_chuva
     if nota:
@@ -340,7 +361,18 @@ def exibir_boletim_modal(row: pd.Series) -> None:
             width='stretch', disabled=serie_chuva.empty,
         )
     with c3:
-        st.info(f"Vazão medida: **{texto(row.get('vazao_m3s'), ' m³/s', 1)}**")
+        if estimada:
+            faixa = estimada["faixa_medida_cm"]
+            st.info(
+                f"Vazão **estimada**: {estimada['vazao_m3s']:,.0f} m³/s"
+                .replace(",", ".")
+                + f"\n\nCurva-chave da própria estação, ajustada sobre pares "
+                  f"medidos de cota × vazão. Erro típico "
+                  f"{estimada['erro_tipico_pct']:.0f} %, válida de "
+                  f"{faixa[0]:.0f} a {faixa[1]:.0f} cm."
+            )
+        else:
+            st.info(f"Vazão medida: **{texto(row.get('vazao_m3s'), ' m³/s', 1)}**")
 
 
 # -----------------------------------------------------------------------------

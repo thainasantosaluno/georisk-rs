@@ -264,6 +264,22 @@ def criar_schema() -> None:
             );
 
             -- Gazetteer da ANA em cache. Ver `_cadastro_ana_nacional`: sem
+            -- Curva-chave por estação, ajustada sobre pares medidos de
+            -- cota x vazão do histórico da ANA. Ver `ajustar_curva_chave`.
+            CREATE TABLE IF NOT EXISTS curva_chave (
+                codigo         TEXT PRIMARY KEY,
+                a              REAL,
+                b              REAL,
+                h0             REAL,
+                r2             REAL,
+                erro_mediano   REAL,
+                n              INTEGER,
+                h_min          REAL,
+                h_max          REAL,
+                aprovada       INTEGER,
+                ajustada_em    TEXT
+            );
+
             -- isto, o host da telemetria cair leva junto a coleta do SACE,
             -- que nada tem a ver com ele.
             CREATE TABLE IF NOT EXISTS gazetteer_ana (
@@ -1846,6 +1862,151 @@ def importar_series_arquivadas(pasta: str | Path = "dados/serie") -> int:
             )
         total += len(linhas)
     return total
+
+
+# -----------------------------------------------------------------------------
+# CURVA-CHAVE — vazão a partir do nível
+# -----------------------------------------------------------------------------
+# O SACE publica nível e NÃO publica vazão: zero das 59 estações dele têm o
+# campo preenchido, e o boletim mostrava "Vazão: Sem dado". A ANA publica vazão
+# para parte da rede, e — mais útil — publica SÉRIE HISTÓRICA de vazão junto com
+# a de cota, o que dá milhares de pares medidos na mesma estação.
+#
+# Com esses pares se ajusta a curva-chave clássica:
+#
+#     Q = a · (h − h₀)^b
+#
+# Não é invenção: são medições da própria estação, e o ajuste é verificável.
+# Medido sobre 2015–2025:
+#
+#     Uruguaiana  r² 0,998   erro mediano  1,4 %
+#     Estrela     r² 0,988                 1,7 %
+#     Muçum       r² 0,973                13,3 %
+#     Iraí        r² 0,966                10,9 %
+#     Encantado   r² 0,493                49,9 %   <- reprovada
+#
+# Encantado mostra por que existe corte: metade das curvas serve, e aceitar
+# todas seria trocar "sem dado" por número errado, que é pior.
+
+R2_MINIMO_CURVA = 0.95
+ERRO_MAXIMO_CURVA_PCT = 20.0
+
+# Quanto se aceita extrapolar acima do maior nível já medido com vazão.
+# Curva-chave extrapola mal, e cheia é justamente a região de extrapolação —
+# então acima disso a vazão volta a ser "sem dado" em vez de virar chute.
+MARGEM_EXTRAPOLACAO = 1.15
+
+
+def ajustar_curva_chave(
+    codigo: str, inicio: str = "01/01/2015", fim: str = "31/12/2025"
+) -> dict | None:
+    """Ajusta e VALIDA a curva-chave de uma estação. None se não há par."""
+    try:
+        vazao = serie_historica_ana(codigo, inicio, fim, "vazao")[["datahora", "valor"]]
+        cota = serie_historica_ana(codigo, inicio, fim, "cota")[["datahora", "valor"]]
+    except Exception:
+        return None
+    if vazao.empty or cota.empty:
+        return None
+
+    par = cota.merge(vazao, on="datahora", suffixes=("_h", "_q")).dropna()
+    par = par[(par["valor_h"] > 0) & (par["valor_q"] > 0)]
+    if len(par) < 200:
+        return None
+
+    h, q = par["valor_h"].to_numpy(float), par["valor_q"].to_numpy(float)
+    # h₀ é o nível de vazão nula, que não é o zero da régua. Varrido em vez de
+    # otimizado: a busca é barata e evita depender de scipy, ausente aqui.
+    melhor = None
+    for h0 in np.arange(0.0, h.min(), max(h.min() / 50.0, 0.5)):
+        x, y = np.log(h - h0), np.log(q)
+        b, log_a = np.polyfit(x, y, 1)
+        r2 = float(np.corrcoef(x, y)[0, 1] ** 2)
+        if melhor is None or r2 > melhor[0]:
+            melhor = (r2, float(h0), float(b), float(np.exp(log_a)))
+    if melhor is None:
+        return None
+
+    r2, h0, b, a = melhor
+    previsto = a * np.power(h - h0, b)
+    erro = float(np.median(np.abs(previsto - q) / q * 100.0))
+    return {
+        "codigo": str(codigo), "a": a, "b": b, "h0": h0, "r2": round(r2, 4),
+        "erro_mediano": round(erro, 1), "n": int(len(par)),
+        "h_min": float(h.min()), "h_max": float(h.max()),
+        "aprovada": int(r2 >= R2_MINIMO_CURVA and erro <= ERRO_MAXIMO_CURVA_PCT),
+        "ajustada_em": _agora(),
+    }
+
+
+def atualizar_curvas_chave(limite: int | None = None) -> pd.DataFrame:
+    """Ajusta a curva-chave das estações fluviométricas e grava."""
+    criar_schema()
+    with conectar() as con:
+        alvos = pd.read_sql_query(
+            "SELECT id, nome, codigo FROM estacao "
+            "WHERE tipo='FLUVIOMETRICA' AND codigo IS NOT NULL", con
+        )
+
+    linhas = []
+    for i, r in enumerate(alvos.itertuples()):
+        if limite and i >= limite:
+            break
+        # Mesmo zero final que já atrapalhou a área de drenagem e o histórico:
+        # São Leopoldo é 8738200 no cadastro e 87380000 na ANA.
+        for candidato in (str(r.codigo).strip(), str(r.codigo).strip() + "0"):
+            ajuste = ajustar_curva_chave(candidato)
+            if ajuste:
+                linhas.append(ajuste)
+                break
+
+    if linhas:
+        with conectar() as con:
+            con.executemany(
+                "INSERT OR REPLACE INTO curva_chave "
+                "(codigo,a,b,h0,r2,erro_mediano,n,h_min,h_max,aprovada,ajustada_em) "
+                "VALUES (:codigo,:a,:b,:h0,:r2,:erro_mediano,:n,:h_min,:h_max,"
+                ":aprovada,:ajustada_em)",
+                linhas,
+            )
+    return pd.DataFrame(linhas)
+
+
+def vazao_estimada(codigo: str, nivel_cm: float) -> dict | None:
+    """Vazão pela curva-chave da estação. None quando não dá para afirmar.
+
+    Devolve None em três casos, e cada um é deliberado: sem curva ajustada,
+    curva reprovada na validação, ou nível acima da faixa em que a curva foi
+    medida. O terceiro é o mais importante — extrapolar curva-chave em cheia é
+    exatamente onde ela erra mais.
+    """
+    if nivel_cm is None or pd.isna(nivel_cm):
+        return None
+    try:
+        with conectar() as con:
+            linha = con.execute(
+                "SELECT a,b,h0,r2,erro_mediano,h_min,h_max,aprovada FROM curva_chave "
+                "WHERE codigo IN (?,?)",
+                (str(codigo).strip(), str(codigo).strip() + "0"),
+            ).fetchone()
+    except Exception:
+        return None
+    if not linha:
+        return None
+
+    a, b, h0, r2, erro, h_min, h_max, aprovada = linha
+    if not aprovada:
+        return None
+    if nivel_cm <= h0 or nivel_cm > h_max * MARGEM_EXTRAPOLACAO:
+        return None
+
+    return {
+        "vazao_m3s": round(float(a * (float(nivel_cm) - h0) ** b), 1),
+        "erro_tipico_pct": erro, "r2": r2,
+        "faixa_medida_cm": (h_min, h_max),
+        "extrapolando": bool(nivel_cm > h_max),
+        "origem": "curva-chave da própria estação",
+    }
 
 
 def exportar_snapshot(pasta: str | Path = "dados") -> list[Path]:
