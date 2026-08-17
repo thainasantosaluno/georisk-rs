@@ -663,9 +663,37 @@ with tab_hidro:
             index=pd.DatetimeIndex([p["instante"] for p in pontos]),
         )
 
-    elegiveis = _analisaveis()
+    # --- SÓ O QUE SUSTENTA DECISÃO
+    #
+    # Esta aba passa a listar apenas estações cuja projeção bateu a persistência
+    # em previsões passadas MEDIDAS. Não é filtro estético: exibir junto o que
+    # não tem lastro obriga quem decide a separar o joio no meio de uma
+    # emergência, e a separação já foi feita aqui com número.
+    #
+    # A barra sobe sozinha: `--calibrar` roda a cada coleta, cada rodada
+    # acrescenta um snapshot ao histórico, e estação que passa a acertar entra
+    # na lista sem ninguém mexer em nada.
+    _todas_analisaveis = _analisaveis()
+    _cache_selo = gh.carregar_projecoes()
+    if not _cache_selo.empty and "confiavel" in _cache_selo.columns:
+        aptos = set(
+            _cache_selo.loc[_cache_selo["confiavel"] == 1, "id_estacao"]
+        )
+        elegiveis = _todas_analisaveis[_todas_analisaveis["id"].isin(aptos)]
+    else:
+        elegiveis = _todas_analisaveis
+    ocultas = len(_todas_analisaveis) - len(elegiveis)
 
-    if elegiveis.empty:
+    if elegiveis.empty and not _todas_analisaveis.empty:
+        st.warning(
+            f"**Nenhuma das {len(_todas_analisaveis)} estações atinge a barra de "
+            f"decisão neste momento.** O critério é ter batido a persistência em "
+            f"previsões passadas medidas. Rode `python georisk_hidrologia.py "
+            f"--calibrar` e depois `--projetar` para reavaliar com o histórico "
+            f"mais recente.",
+            icon="⚠️",
+        )
+    elif elegiveis.empty:
         st.warning(
             "Nenhuma estação tem as duas séries (cota e chuva) no banco. Rode uma "
             "coleta incluindo o SACE — é ele que publica a série de 15 em 15 min."
@@ -922,6 +950,8 @@ with tab_hidro:
                 + ("cor pela projeção — o balão diz por qual régua"
                    if modo_cor == "Projeção" else
                    "cor pela leitura atual contra as cotas oficiais")
+                + (f" · **{ocultas} ocultas** por ainda não baterem a "
+                   "persistência em previsões medidas" if ocultas else "")
             )
 
         st.markdown(f"**Analisando:** {st.session_state['hidro_estacao']}")

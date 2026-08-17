@@ -52,6 +52,19 @@ jobs:
         # já estava versionado. Mês antigo não é tocado.
         run: python georisk_dados.py --exportar
 
+      - name: Medir o acerto das projecoes passadas
+        # ANTES de projetar, de proposito: a projecao desta rodada consulta a
+        # calibracao para decidir se sustenta decisao, entao a calibracao
+        # precisa estar fresca primeiro.
+        #
+        # E o que faz a precisao CRESCER sozinha. Cada rodada deixou um
+        # dados/projecao.csv versionado; agora o desfecho daquelas previsoes ja
+        # aconteceu e esta na serie. Quanto mais rodadas, mais pares medidos, e
+        # mais firme o numero que o painel mostra. Estacao que passa a acertar
+        # entra na lista de decisao sem ninguem mexer em nada.
+        continue-on-error: true
+        run: python georisk_hidrologia.py --calibrar
+
       - name: Projetar todas as estações
         # O mapa do painel colore por projeção, e projetar as ~59 estações leva
         # ~1,2 min — tempo demais para acontecer durante um rerun do Streamlit.
