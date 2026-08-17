@@ -957,8 +957,16 @@ with tab_hidro:
 
         k1, k2, k3, k4 = st.columns(4)
 
-        k1.metric("1 · Choveu (72 h)", texto(acum.get("72h"), " mm", 1))
-        k1.caption(ou(resultado.get("origem_chuva"), "chuva da própria estação"))
+        # A janela do passo 1 tem que ser a MESMA que o balanço consome, senão a
+        # cadeia mente por composição: Porto Mauá exibia "choveu 129 mm" (72 h)
+        # ao lado de "escoou 0 m³", quando o balanço tinha sido feito sobre os
+        # 3 mm das últimas 24 h — e zero escoamento para 3 mm está correto.
+        chuva_do_balanco = balanco.get("precipitacao_total_mm")
+        k1.metric("1 · Choveu (24 h)", texto(chuva_do_balanco, " mm", 1))
+        k1.caption(
+            f"{ou(resultado.get('origem_chuva'), 'chuva da própria estação')} · "
+            f"{texto(acum.get('72h'), ' mm', 1)} em 72 h"
+        )
 
         volume = balanco.get("volume_escoado_m3")
         k2.metric(
