@@ -263,6 +263,16 @@ def criar_schema() -> None:
                 PRIMARY KEY (id_estacao, grandeza, datahora)
             );
 
+            -- Gazetteer da ANA em cache. Ver `_cadastro_ana_nacional`: sem
+            -- isto, o host da telemetria cair leva junto a coleta do SACE,
+            -- que nada tem a ver com ele.
+            CREATE TABLE IF NOT EXISTS gazetteer_ana (
+                lat        REAL,
+                lon        REAL,
+                uf         TEXT,
+                obtido_em  TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS coleta (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 iniciada_em  TEXT,
@@ -680,12 +690,49 @@ _cadastro_nacional: list[dict] | None = None
 def _cadastro_ana_nacional() -> list[dict]:
     """Cadastro telemétrico nacional da ANA (~5.2 mil estações), baixado uma
     única vez por execução. Além de listar as estações, serve de GAZETTEER:
-    é ele que diz a UF de cada coordenada."""
+    é ele que diz a UF de cada coordenada.
+
+    NÃO LEVANTA quando o host está fora. Em 12/08/2026, às 23h21,
+    `telemetriaws1.ana.gov.br` ficou inalcançável a partir do runner
+    ("Network is unreachable") e a exceção subiu por `_dentro_do_rs` até
+    derrubar a rodada inteira — inclusive a coleta do SACE, que estava no ar e
+    nada tem a ver com esse host. Fonte indisponível é rotina; um filtro de UF
+    não pode ser ponto único de falha para todo o resto.
+    """
     global _cadastro_nacional
     if _cadastro_nacional is None:
-        texto = _baixar(f"{ANA_BASE}ListaEstacoesTelemetricas?statusEstacoes=&origem=")
-        _cadastro_nacional = _xml_registros(texto, "Table")
+        try:
+            texto = _baixar(f"{ANA_BASE}ListaEstacoesTelemetricas?statusEstacoes=&origem=")
+            _cadastro_nacional = _xml_registros(texto, "Table")
+        except Exception:
+            _cadastro_nacional = []
     return _cadastro_nacional
+
+
+def _salvar_gazetteer(pontos: list[tuple[float, float, str]]) -> None:
+    """Guarda o gazetteer no banco. É cadastro: muda pouco e vale reusar."""
+    if not pontos:
+        return
+    try:
+        with conectar() as con:
+            con.execute("DELETE FROM gazetteer_ana")
+            con.executemany(
+                "INSERT INTO gazetteer_ana (lat, lon, uf, obtido_em) VALUES (?,?,?,?)",
+                [(la, lo, uf, _agora()) for la, lo, uf in pontos],
+            )
+    except Exception:
+        pass
+
+
+def _gazetteer_salvo() -> list[tuple[float, float, str]]:
+    try:
+        with conectar() as con:
+            return [
+                (r[0], r[1], r[2])
+                for r in con.execute("SELECT lat, lon, uf FROM gazetteer_ana")
+            ]
+    except Exception:
+        return []
 
 
 _gazetteer: list[tuple[float, float, str]] | None = None
@@ -693,7 +740,12 @@ _gazetteer: list[tuple[float, float, str]] | None = None
 
 def _gazetteer_uf() -> list[tuple[float, float, str]]:
     """(lat, lon, UF) de todas as estações do cadastro nacional.
-    Montado uma vez só — é consultado uma vez por estação coletada."""
+
+    Três camadas, nesta ordem: o cadastro recém-baixado, o gazetteer guardado
+    de rodadas anteriores, e — não havendo nenhum — lista vazia. A lista vazia
+    não é falha: faz `_uf_da_coordenada` devolver None, e `_dentro_do_rs` cai
+    na caixa envolvente do estado, que já existia como segundo critério.
+    """
     global _gazetteer
     if _gazetteer is None:
         pontos = []
@@ -702,6 +754,11 @@ def _gazetteer_uf() -> list[tuple[float, float, str]]:
             uf = (e.get("Municipio-UF") or "").strip().upper()[-2:]
             if lat is not None and lon is not None and len(uf) == 2:
                 pontos.append((lat, lon, uf))
+
+        if pontos:
+            _salvar_gazetteer(pontos)
+        else:
+            pontos = _gazetteer_salvo()
         _gazetteer = pontos
     return _gazetteer
 
