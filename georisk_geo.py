@@ -59,6 +59,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import struct
 import time
 from contextlib import contextmanager
 import xml.etree.ElementTree as ET
@@ -242,6 +243,22 @@ def criar_schema_geo(db_path: str = CAMINHO_BANCO_PADRAO) -> None:
                 bacia        TEXT PRIMARY KEY,
                 dados        TEXT,   -- JSON: litologia, estruturas, geomorfologia
                 calculado_em TEXT
+            );
+
+            -- Bacia oficial de cada estação, por ponto-em-polígono contra o
+            -- shapefile das 26 bacias do RS. Ver `atribuir_bacias_oficiais`.
+            CREATE TABLE IF NOT EXISTS bacia_oficial (
+                id_estacao   TEXT PRIMARY KEY,
+                bacia        TEXT,
+                area_km2     REAL,
+                atribuido_em TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS bacia_poligono (
+                nome       TEXT PRIMARY KEY,
+                area_km2   REAL,
+                geojson    TEXT,
+                obtido_em  TEXT
             );
 
             CREATE TABLE IF NOT EXISTS area_drenagem (
@@ -1562,6 +1579,197 @@ def faixas_de_incerteza(
 
 
 # -----------------------------------------------------------------------------
+# BACIAS OFICIAIS DO RS (shapefile SEMA/DRH)
+# -----------------------------------------------------------------------------
+# O projeto vinha rotulando bacia pelo que o SACE publica: quatro nomes, e
+# "Não catalogada (ANA)" para 485 das 552 estações — 88 % do cadastro sem
+# bacia utilizável. O shapefile oficial das 26 bacias do RS resolve isso por
+# ponto-em-polígono: 550 das 552 recebem bacia real, cobrindo as 26.
+#
+# As duas que ficam de fora são barragens sobre o rio Uruguai exatamente na
+# divisa com Santa Catarina (Barra Grande e Foz do Chapecó). Estar fora dos
+# polígonos do RS é o comportamento correto ali, não falha de casamento.
+#
+# CRS do arquivo: SIRGAS 2000 geográfico (EPSG:4674). Em graus, e a diferença
+# para WGS84 é inferior a um metro — por isso não há reprojeção, e o projeto
+# segue sem depender de pyproj.
+#
+# LEITURA SEM GEOPANDAS
+# ---------------------
+# Não há geopandas, fiona, pyshp nem osgeo neste ambiente, e o formato é
+# simples o bastante para ler direto. `_ler_dbf` e `_ler_shp_poligonos` abaixo
+# fazem isso com `struct`, e o resto do projeto continua sem dependência nova.
+
+# Tolerância de simplificação dos polígonos guardados, em graus (~55 m).
+# O arquivo tem 19 MB e polígonos de até 76 mil vértices; para desenhar mapa e
+# testar contenção, essa densidade é desperdício.
+TOLERANCIA_BACIA_GRAUS = 0.0005
+
+
+def _ler_dbf(caminho: str | Path) -> tuple[list[tuple], list[dict]]:
+    """Tabela de atributos do shapefile."""
+    d = Path(caminho).read_bytes()
+    n_reg, tam_cabecalho, tam_registro = struct.unpack("<IHH", d[4:12])
+
+    campos, p = [], 32
+    while d[p] != 0x0D:
+        nome = d[p:p + 11].split(b"\x00")[0].decode("latin-1").strip()
+        campos.append((nome, chr(d[p + 11]), d[p + 16]))
+        p += 32
+
+    linhas = []
+    for i in range(n_reg):
+        deslocamento = tam_cabecalho + i * tam_registro + 1  # +1 pula a exclusão
+        registro = {}
+        for nome, tipo, tamanho in campos:
+            bruto = d[deslocamento:deslocamento + tamanho].decode("utf-8", "replace").strip()
+            if tipo in "NF":
+                try:
+                    bruto = float(bruto) if "." in bruto else int(bruto)
+                except ValueError:
+                    bruto = None
+            registro[nome] = bruto
+            deslocamento += tamanho
+        linhas.append(registro)
+    return campos, linhas
+
+
+def _ler_shp_poligonos(caminho: str | Path) -> list[list[list[tuple]]]:
+    """Anéis de cada polígono do .shp, em ordem de registro."""
+    d = Path(caminho).read_bytes()
+    p, formas = 100, []
+    while p < len(d):
+        _numero, tamanho = struct.unpack(">ii", d[p:p + 8])
+        p += 8
+        fim = p + tamanho * 2
+        tipo = struct.unpack("<i", d[p:p + 4])[0]
+        # 5 = Polygon, 15 = PolygonZ, 25 = PolygonM. O bloco XY é idêntico nos
+        # três — Z e M vêm DEPOIS dos pontos, então basta ignorá-los. Este
+        # arquivo é do tipo 15, e tratá-lo como 5 devolvia zero polígono.
+        if tipo not in (5, 15, 25):
+            p = fim
+            continue
+        n_partes, n_pontos = struct.unpack("<ii", d[p + 36:p + 44])
+        q = p + 44
+        partes = list(struct.unpack(f"<{n_partes}i", d[q:q + 4 * n_partes]))
+        q += 4 * n_partes
+        coords = struct.unpack(f"<{2 * n_pontos}d", d[q:q + 16 * n_pontos])
+        aneis = []
+        for k, inicio in enumerate(partes):
+            final = partes[k + 1] if k + 1 < len(partes) else n_pontos
+            aneis.append([(coords[2 * j], coords[2 * j + 1]) for j in range(inicio, final)])
+        formas.append(aneis)
+        p = fim
+    return formas
+
+
+def carregar_bacias_shapefile(caminho_shp: str | Path) -> list[dict]:
+    """(nome, área declarada, polígono shapely) de cada bacia do arquivo."""
+    from shapely.geometry import Polygon
+
+    base = str(caminho_shp)[:-4] if str(caminho_shp).lower().endswith(".shp") else str(caminho_shp)
+    _, registros = _ler_dbf(base + ".dbf")
+    formas = _ler_shp_poligonos(base + ".shp")
+
+    bacias = []
+    for registro, aneis in zip(registros, formas):
+        if not aneis:
+            continue
+        externo = max(aneis, key=len)
+        buracos = [a for a in aneis if a is not externo and len(a) >= 4]
+        try:
+            # buffer(0) conserta auto-interseção, comum em contorno hidrográfico
+            poligono = Polygon(externo, buracos).buffer(0)
+        except Exception:
+            continue
+        if poligono.is_empty or not poligono.is_valid:
+            continue
+        bacias.append({
+            "nome": str(registro.get("nome", "")).strip(),
+            "area_km2": registro.get("area"),
+            "poligono": poligono,
+        })
+    return bacias
+
+
+def atribuir_bacias_oficiais(
+    caminho_shp: str | Path, db_path: str = CAMINHO_BANCO_PADRAO
+) -> dict:
+    """Atribui a bacia oficial a cada estação e guarda os polígonos."""
+    from shapely.geometry import Point, mapping
+    from shapely.strtree import STRtree
+
+    criar_schema_geo(db_path)
+    bacias = carregar_bacias_shapefile(caminho_shp)
+    if not bacias:
+        return {"bacias": 0, "atribuidas": 0, "fora": 0}
+
+    poligonos = [b["poligono"] for b in bacias]
+    indice = STRtree(poligonos)
+
+    with _conectar(db_path) as con:
+        estacoes = pd.read_sql_query(
+            "SELECT id, lat, lon FROM estacao WHERE lat IS NOT NULL AND lon IS NOT NULL",
+            con,
+        )
+
+    linhas, fora = [], 0
+    for r in estacoes.itertuples():
+        ponto = Point(r.lon, r.lat)
+        achou = None
+        for i in indice.query(ponto):
+            if poligonos[i].contains(ponto):
+                achou = bacias[i]
+                break
+        if achou is None:
+            fora += 1
+            continue
+        linhas.append({
+            "id_estacao": r.id, "bacia": achou["nome"],
+            "area_km2": achou["area_km2"], "atribuido_em": _agora(),
+        })
+
+    with _conectar(db_path) as con:
+        if linhas:
+            con.executemany(
+                "INSERT OR REPLACE INTO bacia_oficial "
+                "(id_estacao, bacia, area_km2, atribuido_em) "
+                "VALUES (:id_estacao,:bacia,:area_km2,:atribuido_em)",
+                linhas,
+            )
+        for b in bacias:
+            simplificado = b["poligono"].simplify(
+                TOLERANCIA_BACIA_GRAUS, preserve_topology=True
+            )
+            con.execute(
+                "INSERT OR REPLACE INTO bacia_poligono "
+                "(nome, area_km2, geojson, obtido_em) VALUES (?,?,?,?)",
+                (b["nome"], b["area_km2"],
+                 json.dumps(mapping(simplificado)), _agora()),
+            )
+
+    return {
+        "bacias": len(bacias), "atribuidas": len(linhas), "fora": fora,
+        "estacoes": len(estacoes),
+    }
+
+
+def bacia_oficial_da_estacao(
+    estacao_id: str, db_path: str = CAMINHO_BANCO_PADRAO
+) -> str | None:
+    """Bacia oficial da estação, ou None se ainda não foi atribuída."""
+    try:
+        criar_schema_geo(db_path)
+        with _conectar(db_path) as con:
+            linha = con.execute(
+                "SELECT bacia FROM bacia_oficial WHERE id_estacao = ?", (estacao_id,)
+            ).fetchone()
+    except Exception:
+        return None
+    return linha[0] if linha else None
+
+
+# -----------------------------------------------------------------------------
 # ÁREA DE DRENAGEM POR ESTAÇÃO
 # -----------------------------------------------------------------------------
 # O modelo agrupado usava a área da BACIA como preditor: 26.315 km² para toda
@@ -1693,7 +1901,15 @@ if __name__ == "__main__":
     ap.add_argument("--banco", default=CAMINHO_BANCO_PADRAO)
     ap.add_argument("--inventario", action="store_true", help="listar manchas já baixadas")
     ap.add_argument("--cn", metavar="BACIA", help="calcular o CN de uma bacia")
+    ap.add_argument("--bacias", metavar="SHP",
+                    help="atribuir a bacia oficial de cada estacao pelo shapefile "
+                         "das 26 bacias do RS")
     args = ap.parse_args()
+
+    if args.bacias:
+        r = atribuir_bacias_oficiais(args.bacias, args.banco)
+        print(json.dumps(r, indent=2, ensure_ascii=False))
+        raise SystemExit(0)
 
     if args.inventario:
         for m in municipios_com_mancha(args.banco):
