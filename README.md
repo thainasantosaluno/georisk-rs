@@ -963,10 +963,35 @@ Até 12 h o modelo cego tem MAE MENOR — ele acerta prevendo que quase nada mud
 o que é verdade na maioria dos instantes e falso exatamente quando importa. O
 modelo com chuva erra mais na média e enxerga a subida.
 
-Isso é uma advertência sobre a própria seleção de preditores deste projeto, que
-escolhe por desempenho fora da amostra: **o critério pode estar favorecendo
-sistematicamente o modelo que não vê cheia**. Fica registrado como suspeita
-medida, não como conclusão.
+Isso levantou a suspeita de que a própria seleção de preditores deste projeto,
+que escolhe por desempenho fora da amostra, estivesse favorecendo o modelo que
+não vê cheia.
+
+#### A suspeita foi testada — e não se confirmou
+
+Trocando o critério por um que pesa só os **5 % maiores aumentos reais**, sobre
+57 estações no horizonte de 12 h:
+
+| Critério | "só cota" vence | "cota + chuva" vence |
+|---|---|---|
+| Atual (todos os pontos) | 36× | 21× |
+| De evento (5 % maiores subidas) | 29× | **28×** |
+
+O critério de evento de fato desloca a balança — a chuva sai de 21 para 28
+vitórias — mas **não a inverte**. E na média das estações a chuva continua pior
+nos dois critérios:
+
+| Conjunto | Ganho (todos) | Ganho (evento) | Captura da subida |
+|---|---|---|---|
+| só cota | −0,182 | **+0,181** | 84 de 155 cm |
+| cota + chuva | −3,136 | −0,298 | **92 de 155 cm** |
+
+A chuva captura um pouco mais da subida (92 contra 84 cm) e paga caro em erro.
+Trocar o critério de seleção com base nisto seria mexer no sistema por uma
+hipótese que a medição não sustentou — então **não foi trocado**.
+
+Fica registrado como resultado negativo, que é informação: o problema não está
+no critério de seleção, e continua em aberto onde está.
 
 ### Erros silenciosos corrigidos
 
