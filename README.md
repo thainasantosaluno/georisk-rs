@@ -990,8 +990,42 @@ A chuva captura um pouco mais da subida (92 contra 84 cm) e paga caro em erro.
 Trocar o critério de seleção com base nisto seria mexer no sistema por uma
 hipótese que a medição não sustentou — então **não foi trocado**.
 
-Fica registrado como resultado negativo, que é informação: o problema não está
-no critério de seleção, e continua em aberto onde está.
+#### O terceiro teste isola a taxa de subida, e resolve a contradição
+
+Os dois experimentos anteriores discordavam: no confronto com picos, "nível +
+tendência" capturava 12 cm de 88; na validação por blocos, capturava 84 de 155.
+Separando os quatro conjuntos, com subida real média de 156 cm:
+
+| Conjunto | Captura | Ganho (todos) | Ganho (evento) |
+|---|---|---|---|
+| A · só nível | 16,9 cm | −1,041 | +0,048 |
+| B · nível + subida | 84,1 cm | −0,182 | **+0,181** |
+| C · nível + chuva | 87,8 cm | −3,615 | −0,628 |
+| D · nível + subida + chuva | **92,1 cm** | −3,136 | −0,298 |
+
+Quem faz o trabalho é a **taxa de subida**, não a chuva: de 17 para 84 cm ao
+acrescentá-la, e de 84 para 92 ao somar a chuva por cima.
+
+E os dois experimentos não se contradizem — medem **momentos diferentes**:
+
+- Nos 5 % maiores ΔH, o rio **já está subindo**, e a tendência recente é
+  altamente informativa. Daí os 84 cm.
+- No confronto com picos, a origem é **antes da subida começar**, onde a
+  tendência é praticamente zero e não carrega informação. Daí os 12 cm.
+
+**A tendência funciona depois que o rio começou a subir, e é cega antes.** A
+chuva é o único termo que poderia ver antes — e é justamente na janela do
+"antes" que a decisão precisa ser tomada.
+
+Isto refina a suspeita sobre o critério de seleção em algo preciso: ele avalia
+sobre todos os instantes, dominados por rio calmo ou já em subida, e por isso
+escolhe modelos apoiados na tendência — que são exatamente os cegos antes do
+evento. Não é o peso dos eventos que está errado no critério; é **o momento em
+que ele mede**.
+
+Nada foi trocado com base nisto. Corrigir exigiria um critério que avalie
+especificamente o instante anterior ao início da subida, e essa validação ainda
+não existe no projeto.
 
 ### Erros silenciosos corrigidos
 
