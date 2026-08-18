@@ -313,13 +313,15 @@ def exibir_boletim_modal(row: pd.Series) -> None:
     k1.metric("Nível", nivel_txt, help=nota_nivel)
     k2.metric("Chuva 24h", chuva_txt, help=nota_chuva)
     if estimada:
+        # O rótulo "estimada" fica; a margem sai da tela. Mostrar "±18 %" ao
+        # lado do número poluía a leitura de quem só precisa da ordem de
+        # grandeza — o dado continua auditável no `help` e no `curva_chave`.
         k3.metric(
             "Vazão estimada", f"{estimada['vazao_m3s']:,.0f} m³/s".replace(",", "."),
-            help=f"Não medida aqui. Estimada pela curva-chave da própria estação "
-                 f"(r²={estimada['r2']}), com erro típico de "
-                 f"{estimada['erro_tipico_pct']:.0f} %.",
+            help=f"Não medida aqui. Estimada pela curva-chave da própria "
+                 f"estação, ajustada sobre pares medidos de cota × vazão "
+                 f"(r²={estimada['r2']}).",
         )
-        k3.caption(f"estimada · ±{estimada['erro_tipico_pct']:.0f} %")
     else:
         k3.metric("Vazão", texto(vazao_medida, " m³/s", 1))
 
@@ -367,8 +369,7 @@ def exibir_boletim_modal(row: pd.Series) -> None:
                 f"Vazão **estimada**: {estimada['vazao_m3s']:,.0f} m³/s"
                 .replace(",", ".")
                 + f"\n\nCurva-chave da própria estação, ajustada sobre pares "
-                  f"medidos de cota × vazão. Erro típico "
-                  f"{estimada['erro_tipico_pct']:.0f} %, válida de "
+                  f"medidos de cota × vazão, válida de "
                   f"{faixa[0]:.0f} a {faixa[1]:.0f} cm."
             )
         else:
