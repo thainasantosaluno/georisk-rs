@@ -318,9 +318,8 @@ def exibir_boletim_modal(row: pd.Series) -> None:
         # grandeza — o dado continua auditável no `help` e no `curva_chave`.
         k3.metric(
             "Vazão estimada", f"{estimada['vazao_m3s']:,.0f} m³/s".replace(",", "."),
-            help=f"Não medida aqui. Estimada pela curva-chave da própria "
-                 f"estação, ajustada sobre pares medidos de cota × vazão "
-                 f"(r²={estimada['r2']}).",
+            help="Não medida aqui. Estimada pela curva-chave da própria "
+                 "estação, ajustada sobre pares medidos de cota × vazão.",
         )
     else:
         k3.metric("Vazão", texto(vazao_medida, " m³/s", 1))
@@ -364,13 +363,16 @@ def exibir_boletim_modal(row: pd.Series) -> None:
         )
     with c3:
         if estimada:
-            faixa = estimada["faixa_medida_cm"]
+            # A validação (r², erro mediano, faixa de validade) continua toda no
+            # cálculo: `ajustar_curva_chave` reprova curva ruim e
+            # `vazao_estimada` recusa extrapolação. O que sai daqui é só a
+            # exibição desses números — a decisão de mostrar ou não o valor
+            # segue sendo tomada por eles.
             st.info(
                 f"Vazão **estimada**: {estimada['vazao_m3s']:,.0f} m³/s"
                 .replace(",", ".")
-                + f"\n\nCurva-chave da própria estação, ajustada sobre pares "
-                  f"medidos de cota × vazão, válida de "
-                  f"{faixa[0]:.0f} a {faixa[1]:.0f} cm."
+                + "\n\nCurva-chave da própria estação, ajustada sobre pares "
+                  "medidos de cota × vazão."
             )
         else:
             st.info(f"Vazão medida: **{texto(row.get('vazao_m3s'), ' m³/s', 1)}**")
