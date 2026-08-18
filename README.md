@@ -911,6 +911,63 @@ instante do pico no passado** — resquício da âncora defasada, corrigida depo
 Foram descartados: retrospectiva não é previsão. Os números acima usam só os
 371 genuinamente futuros.
 
+### Confronto com cheias reais — e o que ele revelou
+
+`catalogo_de_cheias` lista os eventos em que cada estação passou da cota de
+inundação: **325 deles em 26 estações**, incluindo setembro de 2023 e maio de
+2024. A função existia desde cedo e **nada a chamava**. Ligada, virou o teste
+mais duro do projeto: para cada cheia, voltar N dias antes do pico, ajustar o
+modelo só com o que existia até ali, e perguntar o que ele diria.
+
+**Sobre a série histórica diária — 224 cheias, 24 estações:**
+
+| Antecedência | MAE | Detectou |
+|---|---|---|
+| 1 dia | 366 cm | 36 % |
+| 2 dias | 589 cm | 4 % |
+| 3 dias | 710 cm | 2 % |
+
+Viés de −551 cm. Muçum em 04/09/2023 estava a 292 cm na véspera, o modelo
+projetou 303, e o rio foi a **2.611**.
+
+#### A cegueira é do método, não da resolução
+
+O teste acima usa só nível e tendência, porque apenas 2 estações têm chuva
+histórica. Repetindo o mesmo confronto nos 30 dias de 15 min — **72 picos, 35
+estações** — dá para separar as duas causas, trocando apenas o conjunto de
+variáveis:
+
+| Antecedência | Subida real | Capturado só com nível | Capturado com chuva |
+|---|---|---|---|
+| 3 h | 26 cm | 10 cm | 17 cm |
+| 6 h | 57 cm | 9 cm | **43 cm** |
+| 12 h | 88 cm | 12 cm | **88 cm** |
+| 24 h | 234 cm | 65 cm | 128 cm |
+
+Nível e tendência sozinhos capturam 9 a 12 cm de subidas de 57 a 88 cm — são
+cegos em qualquer resolução. **Com chuva, a captura em 12 h é integral.** A
+cegueira do teste histórico era falta de chuva no arquivo, não a granularidade
+diária.
+
+#### O MAE premia o modelo tímido
+
+O contraponto incômodo, na mesma tabela:
+
+| Antecedência | MAE só nível | MAE com chuva |
+|---|---|---|
+| 3 h | **21,0 cm** | 27,5 cm |
+| 12 h | **94,5 cm** | 123,2 cm |
+| 24 h | 203,9 cm | **157,1 cm** |
+
+Até 12 h o modelo cego tem MAE MENOR — ele acerta prevendo que quase nada muda,
+o que é verdade na maioria dos instantes e falso exatamente quando importa. O
+modelo com chuva erra mais na média e enxerga a subida.
+
+Isso é uma advertência sobre a própria seleção de preditores deste projeto, que
+escolhe por desempenho fora da amostra: **o critério pode estar favorecendo
+sistematicamente o modelo que não vê cheia**. Fica registrado como suspeita
+medida, não como conclusão.
+
 ### Erros silenciosos corrigidos
 
 Nenhum destes gerava exceção. Todos produziam número errado com aparência de
