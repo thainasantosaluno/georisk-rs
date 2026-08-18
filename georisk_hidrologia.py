@@ -2749,6 +2749,89 @@ def calibrar_com_serie_historica(
     return pd.DataFrame(registros)
 
 
+def confrontar_cheias_registradas(
+    db_path: str = CAMINHO_BANCO_PADRAO, dias_antes: tuple[int, ...] = (1, 2, 3)
+) -> pd.DataFrame:
+    """Confronta a projeção com as CHEIAS QUE DE FATO ACONTECERAM.
+
+    A calibração operacional mede dias de rotina; a histórica mede 15 anos de
+    dias em sua maioria calmos. Nenhuma das duas responde a pergunta que
+    importa: **numa cheia real, o sistema teria avisado?**
+
+    `catalogo_de_cheias` já sabia listar os eventos — 325 deles em 26 estações,
+    incluindo setembro de 2023 e maio de 2024 — mas nada chamava a função. Aqui
+    ela vira validação: para cada cheia, volta 1, 2 e 3 dias antes do pico,
+    ajusta o modelo **só com o que existia até ali** e pergunta o que ele diria.
+
+    Devolve, por evento e antecedência: nível projetado, pico real, e se a
+    projeção cruzava a cota de inundação — que é o que dispara alerta.
+    """
+    import georisk_dados as gd
+
+    with _conectar(db_path) as con:
+        alvos = pd.read_sql_query(
+            "SELECT id, nome, codigo, cota_inundacao_cm FROM estacao "
+            "WHERE cota_inundacao_cm IS NOT NULL AND codigo IS NOT NULL", con
+        )
+
+    linhas = []
+    for est in alvos.itertuples():
+        catalogo, serie = pd.DataFrame(), pd.DataFrame()
+        for cod in (str(est.codigo).strip(), str(est.codigo).strip() + "0"):
+            try:
+                catalogo = gd.catalogo_de_cheias(cod, est.cota_inundacao_cm)
+                serie = gd.carregar_historico(cod, "cota")
+            except Exception:
+                continue
+            if not catalogo.empty and not serie.empty:
+                break
+        if catalogo.empty or serie.empty:
+            continue
+
+        s = (serie.set_index("datahora")["valor"]
+             .resample("1D").mean().interpolate(limit=3).dropna())
+        if len(s) < 400:
+            continue
+
+        for evento in catalogo.itertuples():
+            pico_real = float(evento.pico_cm)
+            dia_pico = pd.Timestamp(evento.inicio).normalize()
+
+            for antes in dias_antes:
+                origem = dia_pico - pd.Timedelta(days=antes)
+                passado = s[s.index <= origem]
+                # Precisa de história suficiente ANTES do evento, e o corte é
+                # rígido de propósito: qualquer ponto após `origem` seria o
+                # modelo espiando o futuro que ele deveria prever.
+                if len(passado) < 300 or origem not in s.index:
+                    continue
+
+                nivel = passado.to_numpy(dtype=float)
+                subida = np.diff(nivel, prepend=nivel[0])
+                alvo = np.roll(nivel, -antes) - nivel
+                X = np.column_stack([np.ones(len(nivel)), nivel, subida])
+                valido = np.arange(len(nivel)) < len(nivel) - antes
+                if valido.sum() < 250:
+                    continue
+
+                beta = _minimos_quadrados_regularizados(X[valido], alvo[valido])
+                projetado = float(nivel[-1] + X[-1] @ beta)
+
+                linhas.append({
+                    "id_estacao": est.id, "nome": est.nome,
+                    "cheia_em": str(dia_pico.date()), "dias_antes": antes,
+                    "nivel_na_origem_cm": round(float(nivel[-1]), 1),
+                    "projetado_cm": round(projetado, 1),
+                    "pico_real_cm": round(pico_real, 1),
+                    "cota_inundacao_cm": float(est.cota_inundacao_cm),
+                    "erro_cm": round(projetado - pico_real, 1),
+                    "projecao_alertaria": bool(projetado >= est.cota_inundacao_cm),
+                    "ja_estava_acima": bool(nivel[-1] >= est.cota_inundacao_cm),
+                })
+
+    return pd.DataFrame(linhas)
+
+
 def erro_medido(
     estacao_id: str, horas: float, db_path: str = CAMINHO_BANCO_PADRAO
 ) -> dict | None:
