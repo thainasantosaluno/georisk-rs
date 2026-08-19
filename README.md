@@ -137,6 +137,39 @@ coletor descarta e registra o motivo em `observacao`:
   (ex.: 88.130 = 881,30 m em Vacaria), não régua fluviométrica em cm;
 - o valor-sentinela `9999` significa "sem medição".
 
+## Coleta a cada 15 minutos — duas pernas
+
+O GitHub Actions **não honra cron de alta frequência**. Medido neste
+repositório: pedindo `*/15`, os intervalos reais entre as rodadas 102 e 104
+foram de 58 e 69 minutos. Agendamento em repositório público é despriorizado
+sob carga, e cron frequente é o primeiro a ser descartado.
+
+Pedir 15 min ainda valeu — a média caiu de 155 para ~60 min — mas não entrega
+15. Por isso a coleta tem duas pernas, com papéis diferentes:
+
+| Perna | Cadência real | Depende de | Papel |
+|---|---|---|---|
+| **Agendador do Windows** (`coletar.cmd`) | **15 min firmes** | o computador ligado | mantém o banco local fresco para o painel |
+| **GitHub Actions** | ~1 h, irregular | nada ligado | versiona o snapshot e roda calibração e projeção |
+
+A tarefa local **não faz commit nem push**, de propósito: se as duas pernas
+publicassem, disputariam a mesma referência — que já foi a causa das falhas
+das rodadas #94 e #98.
+
+```powershell
+# instalar
+schtasks /Create /TN "GeoRisk-RS Coleta" /TR "C:\projetos\georisk-rs\coletar.cmd" /SC MINUTE /MO 15 /F
+
+# conferir
+Get-ScheduledTaskInfo -TaskName "GeoRisk-RS Coleta"
+
+# remover
+schtasks /Delete /TN "GeoRisk-RS Coleta" /F
+```
+
+O Agendador é serviço do sistema: roda independente do VS Code, do Claude e de
+qualquer janela aberta. O log fica em `coleta_local.log`, fora do versionamento.
+
 ## Atualização automática e arquivo histórico
 
 O workflow `.github/workflows/coleta.yml` roda de 3 em 3 horas, independente da

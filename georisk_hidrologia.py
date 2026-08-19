@@ -351,6 +351,7 @@ def chuva_media_bacia(bacia: str, db_path: str = CAMINHO_BANCO_PADRAO,
 def chuva_area_contribuinte(
     df: pd.DataFrame, bacia: str | None, db_path: str = CAMINHO_BANCO_PADRAO,
     dias: int = 30, correlacao_minima: float = 0.20,
+    estacao_id: str | None = None,
 ) -> tuple[pd.Series, str, int]:
     """Índice de chuva da ÁREA QUE DRENA PARA ESTA ESTAÇÃO.
 
@@ -380,10 +381,37 @@ def chuva_area_contribuinte(
     if not bacia or "cota_cm" not in df or df["cota_cm"].isna().all():
         return local, "chuva medida na estação", 1
 
+    # CANDIDATOS: toda estação da MESMA BACIA OFICIAL, de qualquer fonte.
+    #
+    # Duas restrições saíram daqui, e ambas custavam caro:
+    #
+    # 1. `fonte = 'SACE/SGB'` descartava os 233 pluviômetros da ANA e usava só
+    #    os 62 do SACE — quase um quarto da rede disponível.
+    # 2. O rótulo `bacia` do cadastro tem quatro valores, e 88 % das estações
+    #    caíam em "Não catalogada (ANA)". A bacia oficial do shapefile do RS
+    #    tem 26 e cobre 550 das 552.
+    #
+    # A correlação continua sendo o filtro fino — quem está a jusante não
+    # antecipa e cai fora sozinho. A bacia só evita testar quem é fisicamente
+    # impossível, o que reduz achado espúrio por acaso.
+    ids: list[str] = []
     with _conectar(db_path) as con:
-        ids = [r[0] for r in con.execute(
-            "SELECT id FROM estacao WHERE bacia = ? AND fonte = 'SACE/SGB'", (bacia,)
-        )]
+        oficial = None
+        if estacao_id:
+            linha = con.execute(
+                "SELECT bacia FROM bacia_oficial WHERE id_estacao = ?", (estacao_id,)
+            ).fetchone()
+            oficial = linha[0] if linha else None
+        if oficial:
+            ids = [r[0] for r in con.execute(
+                "SELECT e.id FROM estacao e "
+                "JOIN bacia_oficial b ON b.id_estacao = e.id "
+                "WHERE b.bacia = ?", (oficial,)
+            )]
+        if not ids:      # sem bacia oficial atribuída, volta ao rótulo antigo
+            ids = [r[0] for r in con.execute(
+                "SELECT id FROM estacao WHERE bacia = ?", (bacia,)
+            )]
     if not ids:
         return local, "chuva medida na estação", 1
 
@@ -433,9 +461,11 @@ def chuva_area_contribuinte(
 
 
 def escolher_chuva(df: pd.DataFrame, bacia: str | None,
-                   db_path: str = CAMINHO_BANCO_PADRAO) -> tuple[pd.Series, str]:
+                   db_path: str = CAMINHO_BANCO_PADRAO,
+                   estacao_id: str | None = None) -> tuple[pd.Series, str]:
     """Compatibilidade: devolve a chuva da área contribuinte."""
-    serie, rotulo, _ = chuva_area_contribuinte(df, bacia, db_path)
+    serie, rotulo, _ = chuva_area_contribuinte(
+        df, bacia, db_path, estacao_id=estacao_id)
     return serie, rotulo
 
 
@@ -1701,7 +1731,8 @@ def estimar_tempo_e_impacto_inundacao(
         return resposta
 
     # --- Escolhe a chuva que de fato comanda esta estação
-    chuva_usada, origem_chuva = escolher_chuva(df, cadastro.get("bacia"), db_path)
+    chuva_usada, origem_chuva = escolher_chuva(
+        df, cadastro.get("bacia"), db_path, estacao_id=estacao_id)
     df = df.assign(chuva_mm=chuva_usada.reindex(df.index).fillna(0.0))
     resposta["origem_chuva"] = origem_chuva
 

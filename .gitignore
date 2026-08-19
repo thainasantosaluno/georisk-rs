@@ -24,3 +24,6 @@ Claude/
 # sentido versionar 285 KB de JSON regerado a cada 3 h. Para acionar, veja a
 # secao "Camada de publicacao" do README.
 site/api/
+
+# Log da coleta local agendada (Agendador do Windows)
+coleta_local.log
