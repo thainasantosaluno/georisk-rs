@@ -368,6 +368,11 @@ RE_LOCAL = re.compile(r"chuva\s*-\s*([^<]+?)\s*<br", re.I)
 # Valor-sentinela que o SACE usa para "sem medição" em alguns CSVs.
 SENTINELA = 9999.0
 
+# Fração do que a fonte já tem no banco abaixo da qual a remoção de órfãs é
+# pulada. 0,80 tolera oscilação normal da rede e barra colheita parcial: a
+# rodada que derrubou o banco de 552 para 285 trouxe 55 % da ANA.
+PROPORCAO_MINIMA_PURGA = 0.80
+
 
 def _re_cota(rotulo: str) -> re.Pattern:
     """O SACE alterna 'Cota de Atenção' e 'Cota de atenção' entre páginas."""
@@ -1293,6 +1298,16 @@ def sincronizar(
     # estações nesta rodada. Sem isso, uma coleta que falhasse (como a do SACE
     # em agosto, que devolveu zero por três dias sem acusar erro) apagaria
     # todas as estações daquela fonte.
+    #
+    # O mínimo ABSOLUTO não bastava. Em 19/08/2026 a ANA devolveu 264 estações
+    # em vez das ~485 de sempre — uma coleta parcial, não uma rede que encolheu.
+    # Como 264 > 50, a guarda deixou passar e 267 estações foram apagadas: o
+    # banco caiu de 552 para 285 numa única rodada.
+    #
+    # Agora a guarda é RELATIVA ao que a própria fonte vinha trazendo. Colheita
+    # abaixo de PROPORCAO_MINIMA_PURGA do que existe no banco é tratada como
+    # falha parcial, e nada é removido — órfã de verdade sobrevive mais uma
+    # rodada, o que é infinitamente melhor que perder metade da rede.
     for fonte_nome, coletadas, minimo in (
         ("SACE/SGB", sace, 10),
         ("ANA telemetria", ana if incluir_ana else None, 50),
@@ -1301,6 +1316,16 @@ def sincronizar(
             continue
         vivos = {e["id"] for e in finais if e.get("fonte") == fonte_nome}
         if not vivos:
+            continue
+        with conectar() as con:
+            no_banco = con.execute(
+                "SELECT COUNT(*) FROM estacao WHERE fonte=?", (fonte_nome,)
+            ).fetchone()[0]
+        if no_banco and len(vivos) < no_banco * PROPORCAO_MINIMA_PURGA:
+            erros.append(
+                f"purga de {fonte_nome} pulada: {len(vivos)} estações contra "
+                f"{no_banco} no banco — colheita parcial, não rede menor"
+            )
             continue
         marcas = ",".join("?" * len(vivos))
         with conectar() as con:
@@ -2153,6 +2178,106 @@ def vazao_estimada(codigo: str, nivel_cm: float) -> dict | None:
     }
 
 
+# -----------------------------------------------------------------------------
+# VISÃO UNIFICADA — cada campo pela fonte que o serve melhor
+# -----------------------------------------------------------------------------
+# Nem o SACE nem a ANA bastam sozinhos, e a cobertura de cada um é bem desigual
+# conforme o campo. Medido nas 552 estações:
+#
+#     campo                 ANA      SACE     quem serve melhor
+#     cota_atencao/inund.     0 %     67 %     só o SACE tem
+#     nivel_cm                5 %     87 %     SACE
+#     chuva_24h               6 %     93 %     SACE
+#     vazao_m3s               6 %      0 %     só a ANA tem
+#     rio                    88 %     63 %     ANA
+#
+# Esta visão NÃO migra nada. O campo `bacia` continua com o rótulo de origem,
+# porque `cn_da_bacia` e a caracterização geológica são indexadas por ele — 67
+# estações perderiam o CN real e cairiam no genérico 75, junto com a densidade
+# de drenagem e a de lineamentos, que são 3 das 11 variáveis do modelo.
+#
+# Em vez disso ela ACRESCENTA uma leitura consolidada, com a procedência de
+# cada campo declarada ao lado. Quem quiser o dado cru continua lendo `estacao`;
+# quem quiser o melhor disponível lê daqui e sabe de onde veio cada número.
+
+CAMPOS_UNIFICADOS = (
+    "id", "nome", "municipio", "fonte", "tipo", "lat", "lon",
+    "rio", "bacia", "bacia_oficial", "area_drenagem_km2",
+    "nivel_cm", "medido_em", "chuva_24h", "chuva_72h",
+    "vazao_m3s", "origem_vazao",
+    "cota_atencao_cm", "cota_alerta_cm", "cota_inundacao_cm",
+    "situacao", "cor", "observacao",
+)
+
+
+def visao_unificada() -> pd.DataFrame:
+    """Estado de cada estação com o melhor valor disponível por campo.
+
+    Acrescenta três coisas que o cadastro cru não tem, cada uma vinda de onde
+    ela existe de verdade:
+
+    * `bacia_oficial` — as 26 bacias do shapefile do RS, preenchida para 550
+      das 552. O campo `bacia` do cadastro tem 4 rótulos e joga as 485 estações
+      da ANA em "Não catalogada", o que as torna invisíveis a qualquer consulta
+      por bacia.
+    * `area_drenagem_km2` — a área que a estação drena, do inventário da ANA.
+    * `vazao_m3s` completada pela curva-chave quando a fonte não mede, com
+      `origem_vazao` dizendo se o número foi medido ou estimado.
+
+    Não substitui `estacao`: é leitura derivada, reconstruível a qualquer hora.
+    """
+    criar_schema()
+    with conectar() as con:
+        df = pd.read_sql_query(
+            """
+            SELECT e.*,
+                   b.bacia    AS bacia_oficial,
+                   a.area_km2 AS area_drenagem_km2
+            FROM estacao e
+            LEFT JOIN bacia_oficial b ON b.id_estacao = e.id
+            LEFT JOIN area_drenagem a ON a.id_estacao = e.id
+            """,
+            con,
+        )
+
+    # --- Vazão: medida onde existe, estimada pela curva-chave onde não existe.
+    # A estimativa já se recusa a extrapolar acima da faixa medida, então onde
+    # ela devolve nada o campo continua nulo em vez de virar chute.
+    origens, vazoes = [], []
+    for r in df.itertuples():
+        medida = getattr(r, "vazao_m3s", None)
+        if medida is not None and not pd.isna(medida):
+            vazoes.append(float(medida))
+            origens.append("medida")
+            continue
+        estimada = None
+        if getattr(r, "codigo", None):
+            try:
+                estimada = vazao_estimada(r.codigo, getattr(r, "nivel_cm", None))
+            except Exception:
+                estimada = None
+        if estimada:
+            vazoes.append(estimada["vazao_m3s"])
+            origens.append("curva-chave")
+        else:
+            vazoes.append(None)
+            origens.append(None)
+    df["vazao_m3s"] = vazoes
+    df["origem_vazao"] = origens
+
+    presentes = [c for c in CAMPOS_UNIFICADOS if c in df.columns]
+    return df[presentes]
+
+
+def exportar_visao_unificada(pasta: str | Path = "dados") -> Path:
+    """Publica a visão unificada junto com o snapshot, em CSV."""
+    destino = Path(pasta)
+    destino.mkdir(parents=True, exist_ok=True)
+    caminho = destino / "estacoes_unificado.csv"
+    visao_unificada().to_csv(caminho, index=False, encoding="utf-8")
+    return caminho
+
+
 def exportar_snapshot(pasta: str | Path = "dados") -> list[Path]:
     """Publica o estado atual no FORMATO PADRÃO ÚNICO (CSV + JSON).
 
@@ -2276,6 +2401,7 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
     if args.exportar:
         for caminho in exportar_snapshot():
             print("exportado:", caminho)
+        print("exportado:", exportar_visao_unificada())
         # O arquivo mensal e .csv.gz: binario, que o Git nao consegue
         # delta-comprimir. Reescrevendo a cada 15 min o repositorio incharia
         # rapido, entao ele fica para as rodadas espacadas.
