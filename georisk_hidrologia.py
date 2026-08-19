@@ -394,24 +394,39 @@ def chuva_area_contribuinte(
     # A correlação continua sendo o filtro fino — quem está a jusante não
     # antecipa e cai fora sozinho. A bacia só evita testar quem é fisicamente
     # impossível, o que reduz achado espúrio por acaso.
-    ids: list[str] = []
+    # CANDIDATOS: a UNIÃO do rótulo do cadastro com a bacia oficial.
+    #
+    # A união não é preguiça — foi medida contra as alternativas, nas 55
+    # estações onde as três rodam, pela correlação do índice com a subida:
+    #
+    #     só postos do SACE (original) .... r médio 0,381 | 40 acima de 0,30
+    #     só bacia oficial ................ r médio 0,368 | 32
+    #     UNIÃO das duas .................. r médio 0,404 | 40
+    #
+    # Cada uma sozinha perde algo. O rótulo do cadastro tem quatro valores e as
+    # estações da ANA caem todas em "Não catalogada", então filtrar por ele
+    # ignorava os 233 pluviômetros dela. A bacia oficial inclui a ANA mas é
+    # mais estreita, e derrubava postos do SACE que serviam — Passo São
+    # Lourenço ia de 9 para 1.
+    #
+    # Juntas: 18,4 postos úteis por estação contra 12,2 do original, e melhora
+    # em 19 estações contra piora em 1. A correlação segue sendo o filtro fino;
+    # a bacia só evita testar quem é fisicamente impossível.
     with _conectar(db_path) as con:
-        oficial = None
+        ids = [r[0] for r in con.execute(
+            "SELECT id FROM estacao WHERE bacia = ? AND fonte = 'SACE/SGB'", (bacia,)
+        )]
         if estacao_id:
             linha = con.execute(
                 "SELECT bacia FROM bacia_oficial WHERE id_estacao = ?", (estacao_id,)
             ).fetchone()
-            oficial = linha[0] if linha else None
-        if oficial:
-            ids = [r[0] for r in con.execute(
-                "SELECT e.id FROM estacao e "
-                "JOIN bacia_oficial b ON b.id_estacao = e.id "
-                "WHERE b.bacia = ?", (oficial,)
-            )]
-        if not ids:      # sem bacia oficial atribuída, volta ao rótulo antigo
-            ids = [r[0] for r in con.execute(
-                "SELECT id FROM estacao WHERE bacia = ?", (bacia,)
-            )]
+            if linha:
+                ids += [r[0] for r in con.execute(
+                    "SELECT e.id FROM estacao e "
+                    "JOIN bacia_oficial b ON b.id_estacao = e.id "
+                    "WHERE b.bacia = ?", (linha[0],)
+                )]
+    ids = list(dict.fromkeys(ids))      # preserva a ordem e remove repetido
     if not ids:
         return local, "chuva medida na estação", 1
 
