@@ -41,6 +41,7 @@ publica, o campo fica NULL e a interface mostra "Sem dado" / cinza.
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import sqlite3
@@ -1865,6 +1866,149 @@ def importar_series_arquivadas(pasta: str | Path = "dados/serie") -> int:
 
 
 # -----------------------------------------------------------------------------
+# CHUVA HISTÓRICA DO INMET
+# -----------------------------------------------------------------------------
+# O INMET estava marcado como fora, e a marcação estava certa pelo motivo
+# errado: a API de leitura (`apitempo.inmet.gov.br/estacao/...`) devolve 204
+# vazio para toda estação e toda data, com ou sem token. Testado de novo em
+# 19/08/2026 nas 93 automáticas do RS: 204 em todas.
+#
+# Mas o PORTAL publica o arquivo histórico completo, aberto e sem token:
+#
+#     https://portal.inmet.gov.br/uploads/dadoshistoricos/<ano>.zip
+#
+#     2023 → 107,1 MB     2025 →  90,9 MB
+#     2024 → 102,8 MB     2026 →  55,1 MB
+#
+# Cada zip traz um CSV por estação, com PRECIPITAÇÃO TOTAL HORÁRIA em mm e as
+# coordenadas no cabeçalho. Só de 2026 são 98 estações do RS.
+#
+# POR QUE ISSO IMPORTA MAIS QUE PARECE
+# O confronto com cheias reais mostrou que nível e tendência são cegos ANTES da
+# subida começar, e que a chuva é o único termo capaz de ver antes. O teste
+# histórico não pôde medir isso porque só 2 estações tinham chuva no arquivo.
+# Com o INMET passam a ser ~98, de hora em hora, cobrindo setembro de 2023 e
+# maio de 2024 — as duas cheias que interessa reproduzir.
+
+INMET_HISTORICO = "https://portal.inmet.gov.br/uploads/dadoshistoricos"
+
+# Coluna da chuva no CSV do INMET. O cabeçalho tem acento e vírgula, então o
+# casamento é por prefixo em vez de igualdade.
+PREFIXO_COLUNA_CHUVA = "PRECIPITA"
+
+
+def _parsear_csv_inmet(bruto: str) -> tuple[dict, pd.DataFrame]:
+    """Cabeçalho (nome, código, lat, lon) e série horária de chuva de um CSV."""
+    linhas = bruto.splitlines()
+    cabecalho: dict = {}
+    for linha in linhas[:8]:
+        if ";" not in linha:
+            continue
+        chave, valor = linha.split(";", 1)
+        cabecalho[chave.strip().rstrip(":").upper()] = valor.strip()
+
+    inicio = next(
+        (i for i, l in enumerate(linhas) if l.upper().startswith("DATA;")), None
+    )
+    if inicio is None:
+        return cabecalho, pd.DataFrame()
+
+    colunas = [c.strip() for c in linhas[inicio].split(";")]
+    idx_chuva = next(
+        (i for i, c in enumerate(colunas) if c.upper().startswith(PREFIXO_COLUNA_CHUVA)),
+        None,
+    )
+    if idx_chuva is None:
+        return cabecalho, pd.DataFrame()
+
+    registros = []
+    for linha in linhas[inicio + 1:]:
+        partes = linha.split(";")
+        if len(partes) <= idx_chuva:
+            continue
+        # O INMET usa vírgula decimal e deixa o campo vazio quando não mediu.
+        valor = partes[idx_chuva].strip().replace(",", ".")
+        if not valor:
+            continue
+        try:
+            mm = float(valor)
+        except ValueError:
+            continue
+        if mm < 0 or mm > 300:      # 300 mm em UMA hora não existe no RS
+            continue
+        hora = partes[1].strip().replace(" UTC", "").zfill(4)
+        registros.append((f"{partes[0].strip()} {hora[:2]}:{hora[2:]}", mm))
+
+    if not registros:
+        return cabecalho, pd.DataFrame()
+    df = pd.DataFrame(registros, columns=["datahora", "valor"])
+    df["datahora"] = pd.to_datetime(df["datahora"], format="%Y/%m/%d %H:%M",
+                                    errors="coerce")
+    return cabecalho, df.dropna()
+
+
+def coletar_historico_inmet(
+    anos: tuple[int, ...] = (2024,), uf: str = "RS", progresso=None
+) -> dict:
+    """Baixa o arquivo histórico do INMET e grava a chuva horária do RS."""
+    import zipfile
+
+    criar_schema()
+    criar_schema_historico()
+
+    def avisar(f, m):
+        if progresso:
+            try:
+                progresso(f, m)
+            except Exception:
+                pass
+
+    total, estacoes, erros = 0, set(), []
+    for k, ano in enumerate(anos):
+        avisar(k / len(anos), f"Baixando {ano} do INMET…")
+        try:
+            resposta = _sessao().get(
+                f"{INMET_HISTORICO}/{ano}.zip", timeout=600, stream=True
+            )
+            conteudo = io.BytesIO(resposta.content)
+            arquivo = zipfile.ZipFile(conteudo)
+        except Exception as erro:
+            erros.append(f"{ano}: {type(erro).__name__}")
+            continue
+
+        alvos = [n for n in arquivo.namelist() if f"_{uf}_" in n.upper()]
+        avisar(k / len(anos), f"{ano}: {len(alvos)} estações de {uf}")
+
+        for n, nome in enumerate(alvos):
+            try:
+                cabecalho, serie = _parsear_csv_inmet(
+                    arquivo.read(nome).decode("latin-1")
+                )
+            except Exception:
+                continue
+            if serie.empty:
+                continue
+
+            codigo = f"INMET_{cabecalho.get('CODIGO (WMO)', '').strip()}"
+            estacoes.add(codigo)
+            with conectar() as con:
+                con.executemany(
+                    "INSERT OR REPLACE INTO serie_historica "
+                    "(codigo_estacao, grandeza, datahora, valor, consistencia) "
+                    "VALUES (?,?,?,?,?)",
+                    [(codigo, "chuva", str(d), float(v), 1)
+                     for d, v in serie.itertuples(index=False)],
+                )
+            total += len(serie)
+            if n % 20 == 0:
+                avisar((k + n / max(len(alvos), 1)) / len(anos),
+                       f"{ano}: {n}/{len(alvos)} estações")
+
+    return {"registros": total, "estacoes": len(estacoes),
+            "anos": list(anos), "erros": erros}
+
+
+# -----------------------------------------------------------------------------
 # CURVA-CHAVE — vazão a partir do nível
 # -----------------------------------------------------------------------------
 # O SACE publica nível e NÃO publica vazão: zero das 59 estações dele têm o
@@ -2058,6 +2202,8 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
     ap.add_argument("--anos", type=int, default=15, help="quantos anos de historico")
     ap.add_argument("--importar-arquivo", action="store_true",
                     help="recarregar dados/serie/*.csv.gz para o banco (maquina nova)")
+    ap.add_argument("--inmet", metavar="ANOS",
+                    help="baixar a chuva horaria historica do INMET (ex.: 2023,2024)")
     ap.add_argument("--sem-arquivo", action="store_true",
                     help="exportar so o snapshot, sem reescrever dados/serie/*.csv.gz")
     ap.add_argument("--minimo", type=int, default=100,
@@ -2073,6 +2219,16 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
         print(f"{r['registros']:,} registros históricos de {r['estacoes']} estações")
         if r["erros"]:
             print(f"{len(r['erros'])} avisos:", r["erros"][:5])
+        raise SystemExit(0)
+
+    if args.inmet:
+        anos = tuple(int(a) for a in args.inmet.split(",") if a.strip())
+        r = coletar_historico_inmet(anos=anos,
+                                    progresso=lambda f, m: print(f"[{f:5.0%}] {m}"))
+        print(f"\n{r['registros']:,} registros horarios de chuva, "
+              f"{r['estacoes']} estacoes do INMET")
+        if r["erros"]:
+            print("avisos:", r["erros"])
         raise SystemExit(0)
 
     if args.importar_arquivo:

@@ -11,7 +11,8 @@ o painel mostra "Sem dado" e o ponto fica cinza.
 |---|---|---|
 | **SACE / SGB-CPRM** | Nível, **cotas oficiais** de atenção/alerta/inundação, situação e série real de 15 em 15 min (30 dias) | ✅ em uso |
 | **ANA / Telemetria** | Estações automáticas do RS: nível, vazão e chuva | ✅ em uso |
-| INMET | Lista de estações responde, mas os endpoints de leitura devolvem 204/404 sem token e o portal está atrás de proteção anti-bot | ❌ fora — sem leitura real, a estação não entra |
+| **INMET / portal histórico** | Chuva **horária** de ~98 estações do RS, em arquivo anual aberto (`dadoshistoricos/<ano>.zip`) | ✅ **em uso** — histórico |
+| INMET / API de leitura | `apitempo.inmet.gov.br/estacao/...` devolve **204 vazio** para toda estação e toda data. Reconferido em 19/08/2026 nas 93 automáticas do RS | ❌ fora — sem tempo real |
 | CEMADEN | Sem endpoint público aberto | ❌ fora |
 
 Abrangência: **somente Rio Grande do Sul**. O SACE monitora a bacia do Uruguai
