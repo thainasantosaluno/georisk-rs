@@ -6,7 +6,17 @@ name: Coleta GeoRisk-RS
 # — é grande, binário, e reconstruível em ~2 min.
 on:
   schedule:
-    - cron: "0 */3 * * *"   # de 3 em 3 horas (UTC)
+    # De 15 em 15 minutos, que e a cadencia em que o SACE publica.
+    #
+    # Nem toda rodada faz tudo. A COLETA e leve (~2 min) e roda sempre; a
+    # calibracao e a projecao sao pesadas (~3 min juntas, e a calibracao rele
+    # todo o historico do Git) e rodam so de 3 em 3 horas, decidido pelo
+    # relogio no passo "Definir o peso da rodada".
+    #
+    # O GitHub atrasa agendamento sob carga: medido neste repositorio, com
+    # cron de 3 h os intervalos reais variaram de 1,9 h a 5,4 h. Pedir 15 min
+    # nao garante 15 min -- garante mais tentativas.
+    - cron: "*/15 * * * *"
   workflow_dispatch:         # permite rodar na mão pela aba Actions
     inputs:
       publicar:
@@ -44,13 +54,30 @@ jobs:
         # o módulo hidrológico o importa no topo, e é ele que projeta.
         run: pip install pandas requests urllib3 plotly
 
+      - name: Definir o peso da rodada
+        id: peso
+        run: |
+          H=$(date -u +%H); M=$(date -u +%M)
+          if [ $((10#$H % 3)) -eq 0 ] && [ $((10#$M)) -lt 15 ]; then
+            echo "pesado=true" >> $GITHUB_OUTPUT
+            echo "Rodada PESADA: coleta + arquivo + calibracao + projecao."
+          else
+            echo "pesado=false" >> $GITHUB_OUTPUT
+            echo "Rodada LEVE: so coleta e snapshot."
+          fi
+
       - name: Coletar dados reais, exportar snapshot e arquivar série
         # O runner nasce vazio e morre a cada execução, então o banco aqui só
         # tem a janela de 30 dias que a fonte publica agora. O arquivo mensal
         # em dados/serie/ sobrevive porque vem do próprio repositório: o
         # exportador só reescreve os meses presentes no banco, unindo com o que
         # já estava versionado. Mês antigo não é tocado.
-        run: python georisk_dados.py --exportar
+        run: |
+          if [ "${{ steps.peso.outputs.pesado }}" = "true" ]; then
+            python georisk_dados.py --exportar
+          else
+            python georisk_dados.py --exportar --sem-arquivo
+          fi
 
       - name: Medir o acerto das projecoes passadas
         # ANTES de projetar, de proposito: a projecao desta rodada consulta a
@@ -63,6 +90,7 @@ jobs:
         # mais firme o numero que o painel mostra. Estacao que passa a acertar
         # entra na lista de decisao sem ninguem mexer em nada.
         continue-on-error: true
+        if: steps.peso.outputs.pesado == 'true'
         run: python georisk_hidrologia.py --calibrar
 
       - name: Projetar todas as estações
@@ -72,6 +100,7 @@ jobs:
         # depois do fato: dá para conferir o que o sistema previa às 09h UTC
         # contra o que o rio fez de verdade.
         continue-on-error: true
+        if: steps.peso.outputs.pesado == 'true'
         run: python georisk_hidrologia.py --projetar --exportar dados/projecao.csv
 
       - name: Gerar os JSON publicos (camada de publicacao)
@@ -95,5 +124,16 @@ jobs:
             echo "Nada mudou nesta rodada."
           else
             git commit -m "dados: coleta automática $(date -u '+%Y-%m-%d %H:%M UTC')"
-            git push
+            # `git push` cru falhava por corrida: entre o checkout e o push,
+            # outro commit chegava e a referencia era rejeitada -- foi o que
+            # derrubou as rodadas #94 e #98. Com 15 min de cadencia isso
+            # deixaria de ser eventual. Rebase e tenta de novo.
+            for tentativa in 1 2 3; do
+              if git push; then
+                echo "publicado na tentativa $tentativa"; break
+              fi
+              echo "push rejeitado, rebaseando (tentativa $tentativa)"
+              git pull --rebase --autostash origin main || true
+              sleep $((tentativa * 5))
+            done
           fi

@@ -2058,6 +2058,8 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
     ap.add_argument("--anos", type=int, default=15, help="quantos anos de historico")
     ap.add_argument("--importar-arquivo", action="store_true",
                     help="recarregar dados/serie/*.csv.gz para o banco (maquina nova)")
+    ap.add_argument("--sem-arquivo", action="store_true",
+                    help="exportar so o snapshot, sem reescrever dados/serie/*.csv.gz")
     ap.add_argument("--minimo", type=int, default=100,
                     help="minimo de estacoes para a rodada valer (abaixo disso, "
                          "falha e nao exporta)")
@@ -2118,8 +2120,12 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
     if args.exportar:
         for caminho in exportar_snapshot():
             print("exportado:", caminho)
-        for caminho in exportar_series_mensais():
-            print("arquivado:", caminho)
+        # O arquivo mensal e .csv.gz: binario, que o Git nao consegue
+        # delta-comprimir. Reescrevendo a cada 15 min o repositorio incharia
+        # rapido, entao ele fica para as rodadas espacadas.
+        if not args.sem_arquivo:
+            for caminho in exportar_series_mensais():
+                print("arquivado:", caminho)
 
     if resumo["erros"]:
         print(
