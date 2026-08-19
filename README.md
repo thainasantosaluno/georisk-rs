@@ -1028,6 +1028,34 @@ Nada foi trocado com base nisto. Corrigir exigiria um critério que avalie
 especificamente o instante anterior ao início da subida, e essa validação ainda
 não existe no projeto.
 
+#### Com chuva real do INMET, o confronto melhora pouco
+
+O teste histórico não podia medir o efeito da chuva porque só 2 estações a
+tinham no arquivo. Com o INMET carregado — **1,07 milhão de registros horários,
+70 postos, 2023–2025** — dá para refazer. Chuva agregada dos postos a menos de
+60 km de cada estação fluviométrica, acumulada em 1, 3 e 7 dias:
+
+| Antecedência | MAE só nível | MAE + chuva | Detectou só nível | Detectou + chuva |
+|---|---|---|---|---|
+| 1 dia | 413 cm | **376 cm** | 32 % | **39 %** |
+| 2 dias | 647 cm | 617 cm | 3 % | **7 %** |
+| 3 dias | 759 cm | 747 cm | 2 % | 2 % |
+
+250 eventos, 17 estações. A chuva **ajuda e não resolve**: 7 pontos de detecção
+a 1 dia, 4 pontos a 2 dias, nada a 3.
+
+Isso não contradiz o teste de 15 min, onde a chuva capturava a subida por
+inteiro em 12 h. São horizontes diferentes — **12 horas, não 3 dias**. O que os
+dois juntos dizem é que a antecipação existe na escala de horas e não na de
+dias, e que o limite não é falta de dado de chuva: agora ele está aqui, e o
+resultado mudou pouco.
+
+Quatro suspeitas para o que sobra, nenhuma testada ainda: a série de nível
+histórica é **diária** e perde a resposta sub-diária; a chuva é média simples
+num raio de 60 km, sem ponderação por área contribuinte; o ajuste é **linear** e
+a resposta de cheia é fortemente não linear; e a chuva que causa o pico pode
+cair na cabeceira, fora do raio.
+
 ### Erros silenciosos corrigidos
 
 Nenhum destes gerava exceção. Todos produziam número errado com aparência de
