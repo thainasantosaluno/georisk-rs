@@ -156,9 +156,24 @@ A tarefa local **não faz commit nem push**, de propósito: se as duas pernas
 publicassem, disputariam a mesma referência — que já foi a causa das falhas
 das rodadas #94 e #98.
 
+A tarefa aponta para `coletar_oculto.vbs`, não direto para o `.cmd`. A primeira
+versão abria um **console a cada 15 minutos**, e isso não era só incômodo: fechar
+a janela mata o processo, e as execuções de 15:51 e 10:45 terminaram em
+`0xC000013A` — coleta interrompida no meio. O `wscript` com o parâmetro de janela
+em `0` executa de verdade oculto, sem o piscar que `powershell -WindowStyle
+Hidden` ainda produz, e espera o fim para o Agendador registrar o código real.
+
 ```powershell
-# instalar
-schtasks /Create /TN "GeoRisk-RS Coleta" /TR "C:\projetos\georisk-rs\coletar.cmd" /SC MINUTE /MO 15 /F
+# instalar, oculta
+$acao = New-ScheduledTaskAction -Execute "wscript.exe" `
+        -Argument '//B //Nologo "C:\projetos\georisk-rs\coletar_oculto.vbs"'
+$gatilho = New-ScheduledTaskTrigger -Once -At (Get-Date).Date `
+        -RepetitionInterval (New-TimeSpan -Minutes 15)
+$cfg = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
+        -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+Register-ScheduledTask -TaskName "GeoRisk-RS Coleta" -Action $acao `
+        -Trigger $gatilho -Settings $cfg -Force
 
 # conferir
 Get-ScheduledTaskInfo -TaskName "GeoRisk-RS Coleta"
