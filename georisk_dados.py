@@ -1221,6 +1221,54 @@ def sincronizar(
         erros += erros_ana
         avisar(0.88, f"ANA: {len(ana)} estações telemétricas.")
 
+    # --- COLHEITA CURTA: avisa e REFAZ, antes de deixar a rodada seguir.
+    #
+    # Em 19/08/2026 a ANA devolveu 264 estações em vez das ~485 de sempre. A
+    # rodada seguiu como se fosse normal e a purga de órfãs apagou 267 — o
+    # banco caiu de 552 para 285. A guarda relativa impede o estrago, mas
+    # deixava a rodada publicar um snapshot pela metade em silêncio.
+    #
+    # Agora a fonte curta é refeita uma vez, automaticamente. Falha de rede
+    # costuma ser momentânea, e uma segunda tentativa custa dois minutos contra
+    # três horas de dado degradado até a próxima rodada.
+    colheita_curta: list[str] = []
+    for nome_fonte, lista, recoletar in (
+        ("SACE/SGB", sace, lambda: coletar_sace(baixar_series=baixar_series)),
+        ("ANA telemetria", ana if incluir_ana else None,
+         lambda: coletar_ana(limite=limite_ana)),
+    ):
+        if lista is None:
+            continue
+        with conectar() as con:
+            esperado = con.execute(
+                "SELECT COUNT(*) FROM estacao WHERE fonte=?", (nome_fonte,)
+            ).fetchone()[0]
+        if not esperado or len(lista) >= esperado * PROPORCAO_MINIMA_PURGA:
+            continue
+
+        avisar(0.90, f"{nome_fonte} trouxe {len(lista)} de ~{esperado}. Refazendo…")
+        try:
+            nova, erros_nova = recoletar()
+        except Exception as exc:
+            nova, erros_nova = [], [f"recoleta {nome_fonte}: {type(exc).__name__}"]
+        erros += erros_nova
+
+        if len(nova) > len(lista):
+            avisar(0.92, f"{nome_fonte}: {len(lista)} → {len(nova)} na segunda tentativa.")
+            if nome_fonte == "SACE/SGB":
+                sace = nova
+            else:
+                ana = nova
+            lista = nova
+
+        if len(lista) < esperado * PROPORCAO_MINIMA_PURGA:
+            aviso = (f"COLHEITA CURTA em {nome_fonte}: {len(lista)} estações "
+                     f"contra {esperado} no banco "
+                     f"({len(lista) / esperado:.0%}), mesmo após refazer")
+            colheita_curta.append(aviso)
+            erros.append(aviso)
+            avisar(0.93, aviso)
+
     # --- Mesma estação publicada em duas bacias do SACE.
     #
     # A página do Guaíba reexibe estações do Taquari e do Caí, porque esses
@@ -1346,7 +1394,8 @@ def sincronizar(
         con.execute(
             "INSERT INTO coleta (iniciada_em, terminada_em, fontes, estacoes, erros, detalhe) "
             "VALUES (?,?,?,?,?,?)",
-            (iniciada, _agora(), fontes, len(finais), len(erros), " | ".join(erros[:20])),
+            (iniciada, _agora(), fontes, len(finais), len(erros),
+             " | ".join((colheita_curta + erros)[:20])),
         )
 
     avisar(1.0, "Concluído.")
@@ -1354,6 +1403,7 @@ def sincronizar(
         "estacoes": len(finais),
         "sace": len(sace),
         "ana": len(ana),
+        "colheita_curta": colheita_curta,
         "erros": erros,
         "iniciada_em": iniciada,
         "terminada_em": _agora(),
@@ -1392,13 +1442,14 @@ def ultima_coleta() -> dict | None:
     criar_schema()
     with conectar() as con:
         linha = con.execute(
-            "SELECT iniciada_em, terminada_em, fontes, estacoes, erros "
+            "SELECT iniciada_em, terminada_em, fontes, estacoes, erros, detalhe "
             "FROM coleta ORDER BY id DESC LIMIT 1"
         ).fetchone()
     if not linha:
         return None
     return dict(
-        zip(("iniciada_em", "terminada_em", "fontes", "estacoes", "erros"), linha)
+        zip(("iniciada_em", "terminada_em", "fontes", "estacoes", "erros",
+             "detalhe"), linha)
     )
 
 
@@ -2388,6 +2439,14 @@ if __name__ == "__main__":  # execução direta: coleta e mostra um resumo
         print(f"\n{len(resumo['erros'])} avisos (primeiros 10):")
         for e in resumo["erros"][:10]:
             print("  -", e)
+
+    if resumo.get("colheita_curta"):
+        print()
+        print("!" * 72)
+        for aviso in resumo["colheita_curta"]:
+            print("  " + aviso)
+        print("  A remocao de orfas foi PULADA para nao apagar a rede.")
+        print("!" * 72)
 
     colhidas = int(resumo.get("estacoes") or 0)
     if colhidas < args.minimo:
