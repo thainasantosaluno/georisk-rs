@@ -2279,17 +2279,32 @@ def visao_unificada() -> pd.DataFrame:
     """
     criar_schema()
     with conectar() as con:
+        # `bacia_oficial` e `area_drenagem` pertencem ao georisk_geo e podem
+        # simplesmente não existir: o runner do GitHub monta o banco do zero
+        # pelo coletor, que nunca cria o schema geoespacial. Assumir as tabelas
+        # derrubou oito rodadas seguidas com "no such table: bacia_oficial".
+        #
+        # A visão degrada em vez de falhar — sem as tabelas, as colunas saem
+        # vazias e o resto continua valendo.
+        existentes = {
+            r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        selects, joins = ["e.*"], []
+        if "bacia_oficial" in existentes:
+            selects.append("b.bacia AS bacia_oficial")
+            joins.append("LEFT JOIN bacia_oficial b ON b.id_estacao = e.id")
+        if "area_drenagem" in existentes:
+            selects.append("a.area_km2 AS area_drenagem_km2")
+            joins.append("LEFT JOIN area_drenagem a ON a.id_estacao = e.id")
+
         df = pd.read_sql_query(
-            """
-            SELECT e.*,
-                   b.bacia    AS bacia_oficial,
-                   a.area_km2 AS area_drenagem_km2
-            FROM estacao e
-            LEFT JOIN bacia_oficial b ON b.id_estacao = e.id
-            LEFT JOIN area_drenagem a ON a.id_estacao = e.id
-            """,
-            con,
+            f"SELECT {', '.join(selects)} FROM estacao e {' '.join(joins)}", con
         )
+    for coluna in ("bacia_oficial", "area_drenagem_km2"):
+        if coluna not in df.columns:
+            df[coluna] = None
 
     # --- Vazão: medida onde existe, estimada pela curva-chave onde não existe.
     # A estimativa já se recusa a extrapolar acima da faixa medida, então onde
