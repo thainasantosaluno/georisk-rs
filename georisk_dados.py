@@ -283,6 +283,14 @@ def criar_schema() -> None:
 
             -- isto, o host da telemetria cair leva junto a coleta do SACE,
             -- que nada tem a ver com ele.
+            -- Cadastro das telemetricas do RS, guardado inteiro. Ver
+            -- `_lista_estacoes_ana`: e o que permite recusar lista truncada.
+            CREATE TABLE IF NOT EXISTS cadastro_ana (
+                codigo    TEXT PRIMARY KEY,
+                registro  TEXT,
+                obtido_em TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS gazetteer_ana (
                 lat        REAL,
                 lon        REAL,
@@ -838,8 +846,54 @@ def _lista_estacoes_ana() -> list[dict]:
         if (e.get("Municipio-UF") or "").strip().upper().endswith("-RS")
         and (e.get("StatusEstacao") or "").strip().lower().startswith("ativ")
     ]
-    rs.sort(key=lambda e: (e.get("CodEstacao") or "").startswith("0"))
-    return rs
+
+    # --- CADASTRO TRUNCADO: recusado em silencio, nao aceito em silencio.
+    #
+    # O XML da ANA tem 3,8 MB. Resposta cortada no meio parseia sem erro e
+    # devolve MENOS registros — nada estoura, e a rodada segue achando que a
+    # rede encolheu. Foi assim que a coleta trouxe 264 estacoes em vez de 594:
+    # cadastro pela metade, aceito como verdade.
+    #
+    # O cadastro e dado que muda de mes em mes, entao guardar a ultima versao
+    # boa e compara-la resolve. Lista curta demais e descartada e a guardada
+    # entra no lugar; a leitura de cada estacao continua sendo buscada ao vivo.
+    guardado = _cadastro_ana_salvo()
+    if rs and (not guardado or len(rs) >= len(guardado) * PROPORCAO_MINIMA_PURGA):
+        _salvar_cadastro_ana(rs)
+        return _ordenar_por_transmissao(rs)
+
+    if guardado:
+        return _ordenar_por_transmissao(guardado)
+    return _ordenar_por_transmissao(rs)
+
+
+def _ordenar_por_transmissao(registros: list[dict]) -> list[dict]:
+    """Quem costuma responder primeiro, para `limite` baixo trazer dado útil."""
+    return sorted(
+        registros, key=lambda e: (e.get("CodEstacao") or "").startswith("0")
+    )
+
+
+def _salvar_cadastro_ana(registros: list[dict]) -> None:
+    try:
+        with conectar() as con:
+            con.executemany(
+                "INSERT OR REPLACE INTO cadastro_ana (codigo, registro, obtido_em) "
+                "VALUES (?,?,?)",
+                [(str(r.get("CodEstacao") or "").strip(), json.dumps(r), _agora())
+                 for r in registros if r.get("CodEstacao")],
+            )
+    except Exception:
+        pass
+
+
+def _cadastro_ana_salvo() -> list[dict]:
+    try:
+        with conectar() as con:
+            return [json.loads(r[0])
+                    for r in con.execute("SELECT registro FROM cadastro_ana")]
+    except Exception:
+        return []
 
 
 def _dados_ana(codigo: str, dias: int = 3) -> list[dict]:

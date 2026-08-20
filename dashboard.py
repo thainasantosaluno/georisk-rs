@@ -133,21 +133,15 @@ with st.sidebar:
             + (f" ({int(idade.total_seconds() // 60)} min atrás)" if idade else "")
             + f"\n\n{ultima['fontes']} — {ultima['estacoes']} estações"
         )
-        # Colheita curta na tela, não só no log. A rodada das 16h45 de 19/08
-        # trouxe 55 % da ANA e ninguém teria notado se o banco não tivesse
-        # encolhido pela metade — o coletor agora refaz e avisa, e o aviso
-        # precisa chegar a quem olha o painel.
-        detalhe = str(ultima.get("detalhe") or "")
-        if "COLHEITA CURTA" in detalhe:
-            curtas = [t.strip() for t in detalhe.split("|") if "COLHEITA CURTA" in t]
-            st.warning(
-                "**Coleta incompleta na última rodada.** "
-                + " · ".join(curtas)
-                + ". A remoção de estações órfãs foi pulada para não apagar a "
-                  "rede, e o dado exibido pode estar defasado nas estações que "
-                  "faltaram.",
-                icon="📉",
-            )
+        # A colheita curta NÃO aparece aqui de propósito.
+        #
+        # Ela era sintoma de cadastro truncado aceito como válido, e agora é
+        # corrigida na origem: `_lista_estacoes_ana` recusa lista encurtada e
+        # usa a última boa. Alertar sobre algo que o sistema já resolveu sozinho
+        # transfere ao usuário uma decisão que não é dele — e num painel de
+        # decisão, ruído custa atenção que deveria estar no rio.
+        #
+        # O registro continua inteiro em `coleta.detalhe`, para auditoria.
     else:
         st.warning("Banco vazio. Rode uma coleta.")
 
