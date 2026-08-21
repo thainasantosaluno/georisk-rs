@@ -1197,6 +1197,88 @@ inundação para ela. Sabe-se quanto e quando; não se sabe se é grave. Sem lim
 não há como converter centímetro em decisão — e isso é limitação da fonte, não
 do cálculo.
 
+## As seis limitações que permanecem
+
+Consolidadas ao fim do trabalho, cada uma com o número que a sustenta e a
+distinção entre o que é do método e o que é da fonte.
+
+### 1. O indicador de confiabilidade tem amostra rasa
+
+Ele deixou de ser derivado do ajuste e passou a ser **medido** contra o que o
+rio fez — essa parte está resolvida. A limitação mudou de lugar: são **20
+calibrações sobre 19 estações**, e cada rodada acrescenta poucos pares.
+
+Dom Pedrito em 20/08/2026 ilustra o custo. O selo está positivo, apoiado em
+**11 casos com erro medido de 88 cm** — maior que os 36 cm que ela estava acima
+da cota de inundação. O selo diz "melhor que a persistência", **não** "preciso o
+bastante para esta decisão", e são coisas diferentes.
+
+### 2. O horizonte longo tem causa conhecida, não só sintoma
+
+| Antecedência | Detectou cheia real |
+|---|---|
+| 1 dia | 36 % |
+| 2 dias | 4 % |
+| 3 dias | 2 % |
+
+A causa foi isolada no terceiro teste: **a taxa de subida funciona depois que o
+rio começou a subir e é cega antes**. A chuva é o único termo que enxerga antes
+— captura 88 de 88 cm em 12 h — mas só a que já caiu.
+
+A raiz, portanto, é a ausência de **previsão** de chuva. Enquanto o sistema só
+souber o passado, o teto é a escala de horas, não de dias.
+
+### 3. Estações sem cota oficial, e sem como interpolar
+
+46 de 85 fluviométricas têm limiar. **A ANA publica zero.**
+
+Interpolar foi testado por três vias e todas falham:
+
+| Via | Resultado |
+|---|---|
+| área drenada × cota | r = +0,047 |
+| cota ÷ p90 do próprio rio | CV 0,54 — varia de 0,9× a 4,0× |
+| percentil no histórico de 15 anos | só 2 estações têm as duas coisas |
+
+O motivo é estrutural: **o zero da régua é arbitrário em cada posto**. Usina do
+Gasômetro drena 82.500 km² com inundação em 260 cm; Garruchos drena 116.000 km²
+com 1.500 cm. Não há o que transferir.
+
+### 4. As áreas inundáveis são aproximação fora dos 5 municípios
+
+| Onde | Qualidade |
+|---|---|
+| 5 municípios | mancha modelada pelo IPH-UFRGS |
+| Onde há cota oficial | MDE ancorado, 0,89× ±35 %, sem conectividade hidráulica |
+| Resto do estado | largura proporcional à cota — parâmetro, não modelo |
+
+### 5. A rede de chuva é esparsa
+
+Demonstrado em Dom Pedrito, 20/08/2026: das **11 estações num raio de 80 km, só
+uma transmite chuva**. A bacia do Santa Maria inteira estava sendo julgada por um
+único pluviômetro, enquanto o posto acusava 58 mm em cinco dias e o rio ficava
+36 cm acima da inundação por 38 horas.
+
+Com a rede assim, chuva concentrada a 30 km de um posto é invisível.
+
+### 6. A validação operacional é curta
+
+São **371 previsões** de poucos dias. O confronto com 15 anos existe e traz 224
+cheias reais, mas em **resolução diária** — que não alcança o regime sub-diário
+onde os testes mostraram estar o sinal.
+
+### O que endereçaria três delas de uma vez
+
+O **MERGE do CPTEC** (`ftp.cptec.inpe.br/modelos/tempo/MERGE/GPM/`), verificado
+aberto e legível: chuva em grade contínua estimada por satélite e calibrada por
+pluviômetro, horária desde 2009 e diária desde 1998, em GRIB2 que o `rasterio`
+já lê sem dependência nova.
+
+Ele cobre onde não há posto (limitação 5), dá histórico sub-diário para revalidar
+(limitação 6) e é a porta para os modelos de previsão do INPE, que atacam a raiz
+da limitação 2. Não foi integrado — fica registrado como o próximo passo de maior
+retorno medido.
+
 ## Aviso
 
 O traçado esquemático que sobrou como opção — senos e cossenos ao redor da
