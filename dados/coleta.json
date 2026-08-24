@@ -1,8 +1,8 @@
 {
-  "gerado_em": "2026-08-24 22:04:44",
+  "gerado_em": "2026-08-24 23:06:08",
   "ultima_coleta": {
-    "iniciada_em": "2026-08-24 22:02:50",
-    "terminada_em": "2026-08-24 22:04:44",
+    "iniciada_em": "2026-08-24 23:03:09",
+    "terminada_em": "2026-08-24 23:06:08",
     "fontes": "SACE/SGB + ANA telemetria",
     "estacoes": 563,
     "erros": 8,
