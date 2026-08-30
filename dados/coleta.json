@@ -1,8 +1,8 @@
 {
-  "gerado_em": "2026-08-30 01:45:36",
+  "gerado_em": "2026-08-30 07:33:22",
   "ultima_coleta": {
-    "iniciada_em": "2026-08-30 01:42:34",
-    "terminada_em": "2026-08-30 01:45:36",
+    "iniciada_em": "2026-08-30 07:29:45",
+    "terminada_em": "2026-08-30 07:33:22",
     "fontes": "SACE/SGB + ANA telemetria",
     "estacoes": 563,
     "erros": 8,
@@ -11,7 +11,7 @@
   "total_estacoes": 563,
   "em_inundacao": 0,
   "em_alerta": 0,
-  "em_atencao": 4,
+  "em_atencao": 5,
   "fontes": [
     "SACE/SGB-CPRM",
     "ANA/Telemetria"
