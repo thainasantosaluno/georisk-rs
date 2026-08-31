@@ -2411,6 +2411,27 @@ def atualizar_projecoes(
     """
     criar_schema_projecao(db_path)
     elegiveis = estacoes_analisaveis(db_path)
+
+    # ORDEM: quem está mais desatualizado vai primeiro.
+    #
+    # A gravação em lotes salva o progresso, mas sozinha não bastava: a rodada
+    # seguinte recomeçava do mesmo início e morria no mesmo ponto, então as
+    # últimas estações da lista NUNCA eram alcançadas. Ordenando pela idade do
+    # cache, cada rodada avança a fronteira e o rodízio cobre a rede inteira em
+    # poucas passagens.
+    try:
+        with _conectar(db_path) as con:
+            idade = pd.read_sql_query(
+                "SELECT id_estacao, calculado_em FROM projecao_cache", con
+            )
+        elegiveis = (
+            elegiveis.merge(idade, left_on="id", right_on="id_estacao", how="left")
+            .sort_values("calculado_em", na_position="first")
+            .drop(columns=[c for c in ("id_estacao", "calculado_em") if c in idade])
+        )
+    except Exception:
+        pass
+
     agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     linhas = []
 
@@ -2468,7 +2489,28 @@ def atualizar_projecoes(
             print(f"  [{n:>3}/{len(elegiveis)}] {r.nome[:26]:28s} "
                   f"{registro['classe']:16s} {registro['motivo']}")
 
-    tabela = pd.DataFrame(linhas)
+        # GRAVA EM LOTES, e não só no fim.
+        #
+        # A rede cresceu de 59 para 278 estações analisáveis conforme os postos
+        # da ANA passaram a ter as duas séries. Com ~1,2 s por estação a rodada
+        # começou a estourar o limite de tempo — e como a gravação acontecia uma
+        # vez só, no fim, o timeout jogava fora TODO o trabalho: o cache ficou
+        # dois dias parado enquanto as rodadas rodavam e morriam.
+        #
+        # Em lotes, o que já foi calculado sobrevive. Rodada interrompida deixa
+        # progresso em vez de nada, e a seguinte aproveita o que ficou.
+        if len(linhas) >= TAMANHO_LOTE_PROJECAO:
+            _gravar_projecoes(linhas, db_path)
+            linhas = []
+
+    _gravar_projecoes(linhas, db_path)
+    return carregar_projecoes(db_path)
+
+
+def _gravar_projecoes(linhas: list[dict], db_path: str) -> None:
+    """Grava um lote de projeções. Chamada várias vezes por rodada."""
+    if not linhas:
+        return
     with _conectar(db_path) as con:
         con.executemany(
             "INSERT OR REPLACE INTO projecao_cache ("
@@ -2476,7 +2518,6 @@ def atualizar_projecoes(
             + ",".join(f":{c}" for c in COLUNAS_PROJECAO) + ")",
             linhas,
         )
-    return tabela
 
 
 def carregar_projecoes(db_path: str = CAMINHO_BANCO_PADRAO) -> pd.DataFrame:
@@ -2508,6 +2549,10 @@ FAIXAS_HORIZONTE_CALIBRACAO = ((0, 3), (3, 6), (6, 12), (12, 24), (24, 96))
 
 # Abaixo disto a média não significa nada e a estação fica sem selo.
 MINIMO_PARES_CALIBRACAO = 8
+
+# De quantas em quantas estações a projeção é gravada. Ver
+# `atualizar_projecoes`: gravar só no fim fazia o timeout descartar tudo.
+TAMANHO_LOTE_PROJECAO = 20
 
 
 def criar_schema_calibracao(db_path: str = CAMINHO_BANCO_PADRAO) -> None:
