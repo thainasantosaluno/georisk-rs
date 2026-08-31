@@ -1,17 +1,17 @@
 {
-  "gerado_em": "2026-08-30 22:48:13",
+  "gerado_em": "2026-08-31 01:17:28",
   "ultima_coleta": {
-    "iniciada_em": "2026-08-30 22:45:49",
-    "terminada_em": "2026-08-30 22:48:13",
+    "iniciada_em": "2026-08-31 01:14:27",
+    "terminada_em": "2026-08-31 01:17:28",
     "fontes": "SACE/SGB + ANA telemetria",
     "estacoes": 563,
     "erros": 8,
-    "detalhe": "chuva implausivel descartada: SACE_guaiba_81 | chuva implausivel descartada: SACE_guaiba_55 | chuva implausivel descartada: SACE_guaiba_24 | chuva implausivel descartada: SACE_guaiba_64 | chuva implausivel descartada: SACE_uruguai_66 | chuva implausivel descartada: SACE_uruguai_72 | chuva implausivel descartada: SACE_uruguai_62 | chuva implausivel descartada: SACE_uruguai_11"
+    "detalhe": "chuva implausivel descartada: SACE_guaiba_81 | chuva implausivel descartada: SACE_guaiba_55 | chuva implausivel descartada: SACE_guaiba_64 | chuva implausivel descartada: SACE_guaiba_24 | chuva implausivel descartada: SACE_uruguai_72 | chuva implausivel descartada: SACE_uruguai_62 | chuva implausivel descartada: SACE_uruguai_66 | chuva implausivel descartada: SACE_uruguai_11"
   },
   "total_estacoes": 563,
   "em_inundacao": 0,
-  "em_alerta": 2,
-  "em_atencao": 6,
+  "em_alerta": 1,
+  "em_atencao": 8,
   "fontes": [
     "SACE/SGB-CPRM",
     "ANA/Telemetria"
