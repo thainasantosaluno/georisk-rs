@@ -426,20 +426,31 @@ def chuva_area_contribuinte(
     # Juntas: 18,4 postos úteis por estação contra 12,2 do original, e melhora
     # em 19 estações contra piora em 1. A correlação segue sendo o filtro fino;
     # a bacia só evita testar quem é fisicamente impossível.
+    # `bacia_oficial` é do georisk_geo e pode NÃO EXISTIR: o runner do GitHub
+    # monta o banco só com o coletor. Sem esta proteção, a consulta levanta
+    # OperationalError e derruba a projeção inteira — foi o que aconteceu, e o
+    # custo foi alto: em 20/09/2026 as 78 estações saíram `indefinida`, e dois
+    # dias depois o Taquari subiu a 24,46 m em Estrela com o sistema mudo.
+    #
+    # A união degrada para o ramo do rótulo do cadastro, que sempre existe.
     with _conectar(db_path) as con:
         ids = [r[0] for r in con.execute(
             "SELECT id FROM estacao WHERE bacia = ? AND fonte = 'SACE/SGB'", (bacia,)
         )]
         if estacao_id:
-            linha = con.execute(
-                "SELECT bacia FROM bacia_oficial WHERE id_estacao = ?", (estacao_id,)
-            ).fetchone()
-            if linha:
-                ids += [r[0] for r in con.execute(
-                    "SELECT e.id FROM estacao e "
-                    "JOIN bacia_oficial b ON b.id_estacao = e.id "
-                    "WHERE b.bacia = ?", (linha[0],)
-                )]
+            try:
+                linha = con.execute(
+                    "SELECT bacia FROM bacia_oficial WHERE id_estacao = ?",
+                    (estacao_id,),
+                ).fetchone()
+                if linha:
+                    ids += [r[0] for r in con.execute(
+                        "SELECT e.id FROM estacao e "
+                        "JOIN bacia_oficial b ON b.id_estacao = e.id "
+                        "WHERE b.bacia = ?", (linha[0],)
+                    )]
+            except sqlite3.OperationalError:
+                pass
     ids = list(dict.fromkeys(ids))      # preserva a ordem e remove repetido
     if not ids:
         return local, "chuva medida na estação", 1
@@ -2496,7 +2507,11 @@ def atualizar_projecoes(
                 "horas_ate_inundacao": res.get("tempo_horas_ate_inundacao"),
             })
         except Exception as erro:
-            registro["motivo"] = f"falhou: {type(erro).__name__}"
+            # A MENSAGEM, não só o tipo. Registrar apenas "OperationalError"
+            # custou cinco dias de diagnóstico: o CSV publicado dizia que 64
+            # estações tinham falhado sem dizer por quê, e o passo é
+            # `continue-on-error`, então o workflow seguia verde.
+            registro["motivo"] = f"falhou: {type(erro).__name__}: {str(erro)[:90]}"
 
         linhas.append(registro)
         if verboso:
