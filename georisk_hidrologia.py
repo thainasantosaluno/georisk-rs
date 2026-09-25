@@ -247,6 +247,20 @@ def carregar_series_alinhadas(
     if not cota.empty and float(cota.median()) > COTA_MAXIMA_PLAUSIVEL_CM:
         cota = cota.iloc[0:0]
 
+    # Sentinela e leitura absurda fora, ponto a ponto.
+    #
+    # A guarda acima é por MEDIANA e pega a estação inteira quando ela publica
+    # altitude em vez de régua — o que resolve os 282 mil registros acima de
+    # 5.000 cm. O que escapava era o valor isolado: 6 ocorrências de −9999
+    # (sentinela de "sem medição") e 146 entre −9.000 e −200 cm.
+    #
+    # São 0,018 % da série, mas um −9999 no meio de um hidrograma desloca a
+    # média, a taxa de subida e o ajuste — e a interpolação logo abaixo o
+    # espalharia para os vizinhos. Negativo pequeno FICA: régua abaixo do zero
+    # é leitura legítima, e são 3.154 casos.
+    if not cota.empty:
+        cota = cota[(cota > -200.0) & (cota <= COTA_MAXIMA_PLAUSIVEL_CM)]
+
     chuva = chuva[chuva >= 0]
 
     if cota.empty and chuva.empty:
