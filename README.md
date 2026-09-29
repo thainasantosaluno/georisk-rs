@@ -1197,6 +1197,44 @@ inundação para ela. Sabe-se quanto e quando; não se sabe se é grave. Sem lim
 não há como converter centímetro em decisão — e isso é limitação da fonte, não
 do cálculo.
 
+### A cheia de 22/09/2026, retrotestada hora a hora
+
+A melhor validação do projeto, porque é uma cheia real de cinco estações que
+todas ultrapassaram a cota de inundação. O modelo foi travado com `ate_instante`
+em três momentos, sem enxergar nada depois de cada um.
+
+| Estação | Cota inund. | 20/09 (2 d antes) | 21/09 (1 d antes) | 22/09 (dia do pico) | **Real** |
+|---|---|---|---|---|---|
+| Estrela | 1.900 | 2.064 | 1.480 | **2.501** | 2.446 |
+| Muçum | 1.800 | 1.180 | 732 | **2.111** | 1.873 |
+| Encantado | 1.200 | 182 | 641 | **1.744** | 1.643 |
+| Bom Retiro do Sul | 1.650 | 1.570 | 723 | **1.874** | 1.840 |
+| Santa Tereza | 1.500 | 1.025 | 1.049 | **1.790** | 1.716 |
+
+| Quando | Teria alertado | Erro médio |
+|---|---|---|
+| 2 dias antes | 1 de 5 | 699 cm |
+| 1 dia antes | **0 de 5** | 979 cm |
+| **Dia do pico** | **5 de 5** | **100 cm** |
+
+#### No dia, o sistema é preciso
+
+Erros de 34 a 238 cm sobre subidas de 1.172 a 1.535 cm — entre **2 % e 15 %**. E
+as cinco teriam disparado alerta. Para operação durante o evento, isso sustenta
+decisão.
+
+#### Um dia antes é PIOR que dois dias antes
+
+O resultado contraintuitivo, e ele confirma o mecanismo isolado no terceiro
+teste. Em 20/09 a chuva já tinha caído e ainda comandava a previsão: Estrela
+projetou 2.064 e teria alertado. Em 21/09 o rio começou a subir de leve, **a
+taxa de subida assumiu** e ancorou a projeção no patamar baixo de então — 1.480
+contra 2.446 reais.
+
+É a mesma assinatura de antes: a tendência recente domina assim que aparece, e
+ela só conhece o que já passou pela régua. Não é ruído — é a janela em que o
+termo errado vence a seleção.
+
 ## As seis limitações que permanecem
 
 Consolidadas ao fim do trabalho, cada uma com o número que a sustenta e a

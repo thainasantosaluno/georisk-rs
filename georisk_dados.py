@@ -86,8 +86,8 @@ ICONE_PARA_SITUACAO = {
     "CotaDeInundaoSevera": ("Cota de Inundação Severa", "purple"),
     "CotaDeSecaModerada": ("Seca Moderada", "purple"),
     "CotaDeSecaExcepcional": ("Seca Excepcional", "red"),
-    "SemTransmisso": ("Sem transmissão", "gray"),
-    "EstaoSemTransmisso": ("Sem transmissão", "gray"),
+    "SemTransmisso": ("Sem leitura recente", "gray"),
+    "EstaoSemTransmisso": ("Sem leitura recente", "gray"),
 }
 
 TEMPO_LIMITE = 60
@@ -133,7 +133,18 @@ def _baixar(url: str, tentativas: int = TENTATIVAS, espera: float = ESPERA_INICI
     for tentativa in range(1, tentativas + 1):
         try:
             r = _sessao().get(url, timeout=TEMPO_LIMITE)
-            # 4xx é definitivo: não adianta insistir.
+            # 429 é a exceção entre os 4xx: não é "não existe", é "devagar".
+            #
+            # A telemetria da ANA limita taxa, e o coletor batia com 6
+            # trabalhadores. Medido em 40 estações: com 1 ou 2 trabalhadores o
+            # sucesso é 100 %; com 3 cai para 48 %; com 4 ou 6, para ZERO.
+            # Eram 460 de 496 estações marcadas "Sem transmissão recente" que
+            # na verdade estavam sendo BARRADAS — Pch Moinho transmite nível de
+            # 365 cm e aparecia como muda.
+            if r.status_code == 429:
+                raise requests.HTTPError("HTTP 429 (limite de taxa)", response=r)
+
+            # Os demais 4xx são definitivos: não adianta insistir.
             if 400 <= r.status_code < 500:
                 r.raise_for_status()
             if r.status_code >= 500:
@@ -143,7 +154,8 @@ def _baixar(url: str, tentativas: int = TENTATIVAS, espera: float = ESPERA_INICI
             return r.text
         except requests.HTTPError as exc:
             resposta = getattr(exc, "response", None)
-            if resposta is not None and 400 <= resposta.status_code < 500:
+            if (resposta is not None and 400 <= resposta.status_code < 500
+                    and resposta.status_code != 429):
                 raise
             ultimo_erro = exc
         except (requests.ConnectionError, requests.Timeout, OSError) as exc:
@@ -360,9 +372,9 @@ COR_PARA_SITUACAO = {
     "#ff0033": ("Cota de Inundação", "red"),
     "#ff3333": ("Cota de Inundação", "red"),
     "#cc0000": ("Cota de Inundação Severa", "purple"),
-    "#c4c4c4": ("Sem transmissão", "gray"),
-    "#cccccc": ("Sem transmissão", "gray"),
-    "#999999": ("Sem transmissão", "gray"),
+    "#c4c4c4": ("Sem leitura recente", "gray"),
+    "#cccccc": ("Sem leitura recente", "gray"),
+    "#999999": ("Sem leitura recente", "gray"),
 }
 RE_PONTOS_CHUVA = re.compile(r"const\s+pontosChuva\s*=\s*(\[.*?\]);", re.S)
 
@@ -906,13 +918,36 @@ def _dados_ana(codigo: str, dias: int = 3) -> list[dict]:
     return _xml_registros(_baixar(url), "DadosHidrometereologicos")
 
 
-def coletar_ana(limite: int | None = None, trabalhadores: int = 6) -> tuple[list[dict], list[str]]:
+# Quantas requisições simultâneas a telemetria da ANA tolera. Medido em 40
+# estações: 1 e 2 dão 100 % de sucesso, 3 cai para 48 %, 4 e 6 para zero.
+# Dois não é mais rápido que um, mas absorve melhor uma resposta lenta.
+TRABALHADORES_ANA = 2
+
+# Quanto tempo a coleta da ANA pode consumir numa rodada. A rede inteira leva
+# ~23 min no ritmo que o serviço tolera; com orçamento, cada rodada atende a
+# parte mais desatualizada e a cobertura se completa em poucas passagens.
+ORCAMENTO_ANA_SEGUNDOS = 420.0
+
+
+def coletar_ana(
+    limite: int | None = None, trabalhadores: int = TRABALHADORES_ANA,
+    orcamento_segundos: float | None = -1.0,
+) -> tuple[list[dict], list[str]]:
     """Estações telemétricas (automáticas) da ANA no RS, com a última leitura.
 
     Muitas estações do RS existem no cadastro mas não devolvem leitura pelo
     serviço; essas entram no banco com nível NULL e ficam cinza no mapa —
     de novo, sem preencher com número inventado.
     """
+    # O padrão é lido AQUI, não na assinatura: valor de parâmetro default é
+    # fixado na definição da função, então ajustar `ORCAMENTO_ANA_SEGUNDOS`
+    # depois do import não teria efeito nenhum — e não teve, numa recoleta que
+    # deveria rodar sem orçamento e rodou com ele.
+    # O sentinela -1 distingue "não passaram nada" de "passaram None de
+    # propósito, para rodar a rede inteira".
+    if orcamento_segundos == -1.0:
+        orcamento_segundos = ORCAMENTO_ANA_SEGUNDOS
+
     erros: list[str] = []
     try:
         cadastro = _lista_estacoes_ana()
@@ -921,6 +956,82 @@ def coletar_ana(limite: int | None = None, trabalhadores: int = 6) -> tuple[list
 
     if limite:
         cadastro = cadastro[:limite]
+
+    # --- RODÍZIO POR PRAZO DE VALIDADE
+    #
+    # Buscar as 595 estações leva ~23 min com o paralelismo que a ANA tolera —
+    # inviável a cada 15 min, e no limite do job do GitHub. Buscar sempre as
+    # mesmas primeiras deixaria a cauda eternamente velha.
+    #
+    # Então cada rodada atende quem está há mais tempo sem atualizar, dentro de
+    # um orçamento de tempo. Tudo envelhece, logo tudo tem sua vez, e a rede
+    # inteira se completa em poucas passagens em vez de nenhuma.
+    if orcamento_segundos:
+        try:
+            with conectar() as con:
+                idade = {
+                    r[0]: (r[1] or "")
+                    for r in con.execute(
+                        "SELECT codigo, atualizado_em FROM estacao "
+                        "WHERE fonte = 'ANA telemetria' AND codigo IS NOT NULL"
+                    )
+                }
+            cadastro = sorted(
+                cadastro,
+                key=lambda e: idade.get((e.get("CodEstacao") or "").strip(), ""),
+            )
+        except Exception:
+            pass
+
+    inicio = time.monotonic()
+
+    def _sem_leitura(reg: dict) -> dict | None:
+        """Estação que não coube no orçamento: CARREGA A LEITURA ANTERIOR.
+
+        A primeira versão devolvia só o cadastro, sem medição — e como a
+        gravação é INSERT OR REPLACE, isso APAGAVA o dado bom que já estava no
+        banco. Na primeira rodada com orçamento, 233 estações ficaram com nível
+        e data nulos: a rotação deixou de ser adiamento e virou perda.
+
+        Agora o valor anterior é carregado adiante com seu `medido_em` original.
+        O dado envelhece de forma visível, em vez de sumir.
+        """
+        codigo = (reg.get("CodEstacao") or "").strip()
+        if not codigo:
+            return None
+        municipio_uf = (reg.get("Municipio-UF") or "").strip()
+        base = {
+            "id": f"ANA_{codigo}", "fonte": "ANA telemetria", "codigo": codigo,
+            "nome": (reg.get("NomeEstacao") or codigo).strip().title(),
+            "municipio": municipio_uf.rsplit("-", 1)[0].strip().title() or None,
+            "rio": (reg.get("NomeRio") or "").strip().title() or None,
+            "bacia": "Não catalogada (ANA)",
+            "lat": _float(reg.get("Latitude")), "lon": _float(reg.get("Longitude")),
+            "automatica": 1, "tipo": "PLUVIOMETRICA",
+            "situacao": "Aguardando atualização", "cor": "gray",
+        }
+        try:
+            with conectar() as con:
+                con.row_factory = sqlite3.Row
+                anterior = con.execute(
+                    "SELECT nivel_cm, vazao_m3s, chuva_1h, chuva_24h, chuva_72h, "
+                    "medido_em, tipo, situacao, cor FROM estacao WHERE id = ?",
+                    (base["id"],),
+                ).fetchone()
+        except Exception:
+            anterior = None
+
+        if anterior and anterior["medido_em"]:
+            base.update({k: anterior[k] for k in
+                         ("nivel_cm", "vazao_m3s", "chuva_1h", "chuva_24h",
+                          "chuva_72h", "medido_em", "tipo")
+                         if anterior[k] is not None})
+            # Mantém a classificação anterior: o rio não mudou de estado só
+            # porque a nossa rodada não chegou nele.
+            if anterior["situacao"]:
+                base["situacao"] = anterior["situacao"]
+                base["cor"] = anterior["cor"] or "gray"
+        return base
 
     def _uma(reg: dict) -> dict | None:
         codigo = (reg.get("CodEstacao") or "").strip()
@@ -940,7 +1051,7 @@ def coletar_ana(limite: int | None = None, trabalhadores: int = 6) -> tuple[list
             "automatica": 1,
             "tipo": "PLUVIOMETRICA",
             # Sem cota oficial publicada por esta via -> sem classificação.
-            "situacao": "Sem cota de referência publicada",
+            "situacao": "Sem cota de referência",
             "cor": "gray",
             "url_origem": (
                 f"{ANA_BASE}DadosHidrometeorologicos?codEstacao={codigo}"
@@ -952,7 +1063,7 @@ def coletar_ana(limite: int | None = None, trabalhadores: int = 6) -> tuple[list
         except Exception:
             registros = []
         if not registros:
-            est["situacao"] = "Sem transmissão recente"
+            est["situacao"] = "Sem leitura recente"
             return est
 
         registros.sort(key=lambda r: r.get("DataHora") or "")
@@ -985,8 +1096,26 @@ def coletar_ana(limite: int | None = None, trabalhadores: int = 6) -> tuple[list
             est["_serie_cota"] = pd.DataFrame(nivel_linhas, columns=["datahora", "valor"])
         return est
 
+    # O orçamento é verificado DENTRO de `_uma`, não antes do pool: com duas
+    # linhas em paralelo, parar cedo desperdiça a que ainda estava respondendo.
+    # Estourado o tempo, as restantes devolvem só o cadastro, sem leitura — a
+    # estação continua no mapa, com o dado da rodada anterior, e sobe na fila
+    # da próxima.
+    def _uma_com_orcamento(reg: dict) -> dict | None:
+        if orcamento_segundos and time.monotonic() - inicio > orcamento_segundos:
+            return _sem_leitura(reg)
+        return _uma(reg)
+
     with ThreadPoolExecutor(max_workers=trabalhadores) as ex:
-        resultado = [e for e in ex.map(_uma, cadastro) if e]
+        resultado = [e for e in ex.map(_uma_com_orcamento, cadastro) if e]
+
+    atendidas = sum(1 for e in resultado if e.get("medido_em"))
+    if orcamento_segundos and atendidas < len(cadastro):
+        erros.append(
+            f"ANA: {atendidas} de {len(cadastro)} atualizadas nesta rodada "
+            f"(orçamento de {orcamento_segundos:.0f}s); o restante entra na "
+            f"frente da fila na próxima"
+        )
 
     return resultado, erros
 
@@ -1021,17 +1150,39 @@ def coletar_ana(limite: int | None = None, trabalhadores: int = 6) -> tuple[list
 # valor, unidade) com grandeza 'cota' (cm) ou 'chuva' (mm) e datahora no
 # mesmo formato 'YYYY-MM-DD HH:MM:SS'.
 
+# VOCABULÁRIO ÚNICO DA SITUAÇÃO
+#
+# O campo responde a uma só pergunta — "o que o painel mostra desta estação" —
+# e os valores se dividem em dois grupos que não se confundem:
+#
+#   ESTADO DO RIO    exige leitura E cota oficial; é o que sustenta decisão
+#   ESTADO DA LEITURA  por que não há estado do rio, e de quem é a lacuna
+#
+# Antes havia dois termos para a mesma coisa ("Sem transmissão" e "Sem
+# transmissão recente") e um deles era aplicado errado: 482 estações apareciam
+# como mudas quando estavam sendo barradas por limite de taxa da ANA. Termo
+# único e preciso evita que um defeito nosso se disfarce de silêncio da fonte.
 SITUACOES = {
-    "Normal": "green",
-    "Cota de Atenção": "gold",
-    "Cota de Alerta": "orange",
-    "Cota de Inundação": "red",
+    # --- estado do rio
     "Cota de Inundação Severa": "purple",
-    "Seca Moderada": "purple",
+    "Cota de Inundação": "red",
+    "Cota de Alerta": "orange",
+    "Cota de Atenção": "gold",
+    "Normal": "green",
     "Seca Excepcional": "red",
-    "Sem transmissão": "gray",
-    "Sem transmissão recente": "gray",
-    "Sem cota de referência publicada": "gray",
+    "Seca Moderada": "purple",
+    # --- estado da leitura
+    "Sem cota de referência": "gray",   # tem leitura, a fonte não publica limiar
+    "Sem leitura recente": "gray",      # a estação não devolveu medição
+    "Aguardando atualização": "gray",   # não coube no orçamento desta rodada
+}
+
+# Grafias antigas e variantes da fonte, mapeadas para o termo único.
+SITUACOES_ANTIGAS = {
+    "Sem transmissão": "Sem leitura recente",
+    "Sem transmissão recente": "Sem leitura recente",
+    "Sem cota de referência publicada": "Sem cota de referência",
+    "Sem Informação": "Sem leitura recente",
 }
 
 UNIDADES = {"cota": "cm", "chuva": "mm"}
@@ -1133,7 +1284,9 @@ def _padronizar(est: dict) -> dict:
         saida["tipo"] = "PLUVIOMETRICA"
     saida["automatica"] = 1 if saida.get("automatica", 1) else 0
 
-    situacao = saida.get("situacao") or "Sem cota de referência publicada"
+    situacao = saida.get("situacao") or "Sem cota de referência"
+    # Grafia antiga ou variante da fonte -> termo único.
+    situacao = SITUACOES_ANTIGAS.get(situacao, situacao)
     # Aceita a grafia variável do SGB ('Cota de inundação' / 'Cota de Inundação').
     for oficial in SITUACOES:
         if situacao.casefold() == oficial.casefold():
