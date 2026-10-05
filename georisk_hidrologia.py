@@ -214,7 +214,38 @@ def carregar_cadastro(estacao_id: str, db_path: str = CAMINHO_BANCO_PADRAO) -> d
     return dict(linha)
 
 
+# Cache das séries alinhadas, chaveado por (estação, banco, dias).
+#
+# `chuva_area_contribuinte` testa dezenas de pluviômetros por estação, e com o
+# critério de união isso passou de ~12 para 43 postos. Como as estações de uma
+# mesma bacia compartilham quase todos os candidatos, a série de cada posto era
+# relida do SQLite uma vez por estação analisada.
+#
+# Medido: a função consumia 2,7 s dos 3,9 s de cada estimativa, e as 331
+# estações levavam ~60 min. O cache elimina a releitura sem mudar resultado
+# nenhum — a série é a mesma dentro de uma rodada.
+_CACHE_SERIES: dict[tuple, pd.DataFrame] = {}
+
+
+def limpar_cache_series() -> None:
+    """Esvazia o cache de séries. Chamar entre rodadas de coleta."""
+    _CACHE_SERIES.clear()
+
+
 def carregar_series_alinhadas(
+    estacao_id: str, db_path: str = CAMINHO_BANCO_PADRAO, dias: int = 30
+) -> pd.DataFrame:
+    chave = (estacao_id, db_path, dias)
+    guardada = _CACHE_SERIES.get(chave)
+    if guardada is not None:
+        return guardada.copy()
+    resultado = _carregar_series_alinhadas(estacao_id, db_path, dias)
+    if len(_CACHE_SERIES) < 1200:          # teto para não crescer sem limite
+        _CACHE_SERIES[chave] = resultado
+    return resultado.copy()
+
+
+def _carregar_series_alinhadas(
     estacao_id: str, db_path: str = CAMINHO_BANCO_PADRAO, dias: int = 30
 ) -> pd.DataFrame:
     """Cota e chuva na MESMA grade de 15 min.
