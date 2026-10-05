@@ -39,6 +39,30 @@ import georisk_geo as gg
 import georisk_hidrologia as gh
 
 
+# -----------------------------------------------------------------------------
+# LADRILHOS DO MAPA
+# -----------------------------------------------------------------------------
+# O CartoDB passou a exigir chave de API. Ele continua respondendo HTTP 200 com
+# um PNG — só que o PNG é a marca d'água "API KEY REQUIRED", então o mapa
+# aparecia coberto de aviso e o erro não era detectável por código de status.
+#
+# O Esri serve os mesmos papéis sem chave, e já era o provedor da imagem de
+# satélite das outras abas. Centralizado aqui para os dois painéis usarem o
+# mesmo, e para a próxima troca ser num lugar só.
+BASE_ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services"
+
+TILE_CLARO = f"{BASE_ESRI}/Canvas/World_Light_Gray_Base/MapServer/tile/{{z}}/{{y}}/{{x}}"
+ATTR_CLARO = "Esri Light Gray Canvas"
+
+TILE_SATELITE = f"{BASE_ESRI}/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}"
+ATTR_SATELITE = "Esri World Imagery"
+
+TILE_ROTULOS = (
+    f"{BASE_ESRI}/Reference/World_Boundaries_and_Places/MapServer/tile/{{z}}/{{y}}/{{x}}"
+)
+ATTR_ROTULOS = "Esri Reference"
+
+
 def avisar_defasagem(df: pd.DataFrame, limite_horas: float = 3.0) -> None:
     """Avisa quando uma fonte ficou para trás das outras.
 

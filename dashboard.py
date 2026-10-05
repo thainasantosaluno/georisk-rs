@@ -436,7 +436,7 @@ with tab_mapa:
     col_map, col_tab = st.columns([2.2, 1.1])
 
     with col_map:
-        mapa = folium.Map(location=center_pos, zoom_start=zoom_pos, tiles="CartoDB positron")
+        mapa = folium.Map(location=center_pos, zoom_start=zoom_pos, tiles=gm.TILE_CLARO, attr=gm.ATTR_CLARO)
         for _, row in df_filtrado.dropna(subset=["lat", "lon"]).iterrows():
             folium.CircleMarker(
                 location=[row["lat"], row["lon"]],
@@ -581,12 +581,10 @@ with tab_manchas:
 
         mapa_sat = folium.Map(
             location=center_m2, zoom_start=zoom_m2,
-            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-            attr="Esri World Imagery",
+            tiles=gm.TILE_SATELITE, attr=gm.ATTR_SATELITE,
         )
         folium.TileLayer(
-            tiles="https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png",
-            attr="CartoDB Labels", overlay=True,
+            tiles=gm.TILE_ROTULOS, attr=gm.ATTR_ROTULOS, overlay=True,
         ).add_to(mapa_sat)
 
         alvos = df_estacoes[
@@ -899,14 +897,10 @@ with tab_hidro:
 
             mapa_h = folium.Map(
                 location=centro, zoom_start=zoom_h,
-                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/"
-                      "World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                attr="Esri World Imagery",
+                tiles=gm.TILE_SATELITE, attr=gm.ATTR_SATELITE,
             )
             folium.TileLayer(
-                tiles="https://{s}.basemaps.cartocdn.com/rastertiles/"
-                      "voyager_only_labels/{z}/{x}/{y}{r}.png",
-                attr="CartoDB Labels", overlay=True,
+                tiles=gm.TILE_ROTULOS, attr=gm.ATTR_ROTULOS, overlay=True,
             ).add_to(mapa_h)
 
             for _, linha in elegiveis.dropna(subset=["lat", "lon"]).iterrows():

@@ -423,7 +423,7 @@ with tab1:
     centro = MUNICIPIOS_RS_COORDS.get(cid_tab1, [-29.7, -51.8])
     zoom = 12 if cid_tab1 != "-- Selecionar Cidade --" else 7
 
-    mapa = folium.Map(location=centro, zoom_start=zoom, tiles="CartoDB positron")
+    mapa = folium.Map(location=centro, zoom_start=zoom, tiles=gm.TILE_CLARO, attr=gm.ATTR_CLARO)
     for _, r in df_f.dropna(subset=["lat", "lon"]).iterrows():
         nivel_txt = _mostrar(r.get("nivel_cm"), " cm")
         chuva_txt = _mostrar(r.get("chuva_24h"), " mm", 1)
@@ -509,12 +509,10 @@ with tab2:
 
         mapa_sat = folium.Map(
             location=centro2, zoom_start=zoom2,
-            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-            attr="Esri World Imagery",
+            tiles=gm.TILE_SATELITE, attr=gm.ATTR_SATELITE,
         )
         folium.TileLayer(
-            tiles="https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png",
-            attr="CartoDB Labels", overlay=True,
+            tiles=gm.TILE_ROTULOS, attr=gm.ATTR_ROTULOS, overlay=True,
         ).add_to(mapa_sat)
 
         alvos = df_fluvio.dropna(subset=["lat", "lon"])
