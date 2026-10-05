@@ -423,7 +423,14 @@ with tab1:
     centro = MUNICIPIOS_RS_COORDS.get(cid_tab1, [-29.7, -51.8])
     zoom = 12 if cid_tab1 != "-- Selecionar Cidade --" else 7
 
-    mapa = folium.Map(location=centro, zoom_start=zoom, tiles=gm.TILE_CLARO, attr=gm.ATTR_CLARO)
+    # Satélite com rótulos por cima, igual à aba de previsão.
+    mapa = folium.Map(
+        location=centro, zoom_start=zoom,
+        tiles=gm.TILE_SATELITE, attr=gm.ATTR_SATELITE,
+    )
+    folium.TileLayer(
+        tiles=gm.TILE_ROTULOS, attr=gm.ATTR_ROTULOS, overlay=True,
+    ).add_to(mapa)
     for _, r in df_f.dropna(subset=["lat", "lon"]).iterrows():
         nivel_txt = _mostrar(r.get("nivel_cm"), " cm")
         chuva_txt = _mostrar(r.get("chuva_24h"), " mm", 1)

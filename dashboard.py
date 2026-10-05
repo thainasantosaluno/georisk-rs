@@ -436,7 +436,15 @@ with tab_mapa:
     col_map, col_tab = st.columns([2.2, 1.1])
 
     with col_map:
-        mapa = folium.Map(location=center_pos, zoom_start=zoom_pos, tiles=gm.TILE_CLARO, attr=gm.ATTR_CLARO)
+        # Satélite com rótulos por cima, igual à aba de previsão: o terreno
+        # mostra relevo, vale e mancha urbana, que o fundo cinza apagava.
+        mapa = folium.Map(
+            location=center_pos, zoom_start=zoom_pos,
+            tiles=gm.TILE_SATELITE, attr=gm.ATTR_SATELITE,
+        )
+        folium.TileLayer(
+            tiles=gm.TILE_ROTULOS, attr=gm.ATTR_ROTULOS, overlay=True,
+        ).add_to(mapa)
         for _, row in df_filtrado.dropna(subset=["lat", "lon"]).iterrows():
             folium.CircleMarker(
                 location=[row["lat"], row["lon"]],
