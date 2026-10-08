@@ -1,17 +1,17 @@
 {
-  "gerado_em": "2026-10-08 06:25:29",
+  "gerado_em": "2026-10-08 14:01:28",
   "ultima_coleta": {
-    "iniciada_em": "2026-10-08 06:17:36",
-    "terminada_em": "2026-10-08 06:25:29",
+    "iniciada_em": "2026-10-08 13:53:41",
+    "terminada_em": "2026-10-08 14:01:27",
     "fontes": "SACE/SGB + ANA telemetria",
     "estacoes": 565,
     "erros": 10,
-    "detalhe": "chuva implausivel descartada: SACE_guaiba_11 | chuva implausivel descartada: SACE_guaiba_13 | chuva implausivel descartada: SACE_guaiba_24 | chuva implausivel descartada: SACE_guaiba_64 | chuva implausivel descartada: SACE_guaiba_55 | chuva implausivel descartada: SACE_uruguai_66 | chuva implausivel descartada: SACE_uruguai_60 | chuva implausivel descartada: SACE_uruguai_72 | chuva implausivel descartada: SACE_uruguai_62 | ANA: 322 de 595 atualizadas nesta rodada (orçamento de 420s); o restante entra na frente da fila na próxima"
+    "detalhe": "chuva implausivel descartada: SACE_guaiba_11 | chuva implausivel descartada: SACE_guaiba_24 | chuva implausivel descartada: SACE_guaiba_13 | chuva implausivel descartada: SACE_guaiba_64 | chuva implausivel descartada: SACE_guaiba_55 | chuva implausivel descartada: SACE_uruguai_66 | chuva implausivel descartada: SACE_uruguai_72 | chuva implausivel descartada: SACE_uruguai_60 | chuva implausivel descartada: SACE_uruguai_62 | ANA: 359 de 595 atualizadas nesta rodada (orçamento de 420s); o restante entra na frente da fila na próxima"
   },
   "total_estacoes": 565,
   "em_inundacao": 5,
   "em_alerta": 2,
-  "em_atencao": 3,
+  "em_atencao": 2,
   "fontes": [
     "SACE/SGB-CPRM",
     "ANA/Telemetria"
