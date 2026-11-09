@@ -1,12 +1,12 @@
 {
-  "gerado_em": "2026-11-09 06:43:30",
+  "gerado_em": "2026-11-09 17:00:09",
   "ultima_coleta": {
-    "iniciada_em": "2026-11-09 06:36:21",
-    "terminada_em": "2026-11-09 06:43:30",
+    "iniciada_em": "2026-11-09 16:52:56",
+    "terminada_em": "2026-11-09 17:00:08",
     "fontes": "SACE/SGB + ANA telemetria",
     "estacoes": 558,
     "erros": 5,
-    "detalhe": "mapa taquari: HTTPError: 404 Client Error:  for url: https://www.sgb.gov.br/sace/sace_nivel/estacoes_mapa.php?bacia=taquari | mapa cai: HTTPError: 404 Client Error:  for url: https://www.sgb.gov.br/sace/sace_nivel/estacoes_mapa.php?bacia=cai | mapa guaiba: HTTPError: 404 Client Error:  for url: https://www.sgb.gov.br/sace/sace_nivel/estacoes_mapa.php?bacia=guaiba | mapa uruguai: HTTPError: 404 Client Error:  for url: https://www.sgb.gov.br/sace/sace_nivel/estacoes_mapa.php?bacia=uruguai | ANA: 350 de 600 atualizadas nesta rodada (orçamento de 420s); o restante entra na frente da fila na próxima"
+    "detalhe": "mapa taquari: HTTPError: 404 Client Error:  for url: https://www.sgb.gov.br/sace/sace_nivel/estacoes_mapa.php?bacia=taquari | mapa cai: HTTPError: 404 Client Error:  for url: https://www.sgb.gov.br/sace/sace_nivel/estacoes_mapa.php?bacia=cai | mapa guaiba: HTTPError: 404 Client Error:  for url: https://www.sgb.gov.br/sace/sace_nivel/estacoes_mapa.php?bacia=guaiba | mapa uruguai: HTTPError: 404 Client Error:  for url: https://www.sgb.gov.br/sace/sace_nivel/estacoes_mapa.php?bacia=uruguai | ANA: 340 de 600 atualizadas nesta rodada (orçamento de 420s); o restante entra na frente da fila na próxima"
   },
   "total_estacoes": 558,
   "em_inundacao": 0,
